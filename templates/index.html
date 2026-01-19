@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ bot_name }}</title>
+    
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    
+    <style>
+        /* ===== CSS Variables ===== */
+        :root {
+            --primary-color: #0088cc;
+            --secondary-color: #2ecc71;
+            --warning-color: #f39c12;
+            --danger-color: #e74c3c;
+            --dark-bg: #1a1a2e;
+            --card-bg: #16213e;
+            --text-color: #eee;
+            --code-bg: #0f0f23;
+            --border-color: #3d5a80;
+        }
+        
+        /* ===== Global Styles ===== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+            background: linear-gradient(135deg, var(--dark-bg) 0%, #0f0f23 100%);
+            color: var(--text-color);
+            line-height: 1.8;
+            min-height: 100vh;
+        }
+        
+        /* ===== Header ===== */
+        header {
+            text-align: center;
+            padding: 60px 20px;
+            background: linear-gradient(135deg, var(--primary-color) 0%, #005577 100%);
+            margin-bottom: 40px;
+            border-radius: 0 0 30px 30px;
+            box-shadow: 0 10px 40px rgba(0, 136, 204, 0.3);
+        }
+        
+        header h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        header p {
+            font-size: 1.3em;
+            opacity: 0.9;
+        }
+        
+        /* ===== Container ===== */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px 40px 20px;
+        }
+        
+        /* ===== Dashboard Grid ===== */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+            margin-top: 30px;
+        }
+        
+        /* ===== Widget Card ===== */
+        .widget-card {
+            background: var(--card-bg);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 5px 25px rgba(0,0,0,0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .widget-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 35px rgba(0,0,0,0.4);
+        }
+        
+        /* ===== Widget Header ===== */
+        .widget-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid var(--border-color);
+        }
+        
+        .widget-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+        
+        .widget-icon {
+            font-size: 2em;
+            opacity: 0.7;
+        }
+        
+        /* ===== Widget Content ===== */
+        .widget-content {
+            text-align: center;
+        }
+        
+        .widget-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .widget-label {
+            font-size: 0.95em;
+            opacity: 0.8;
+        }
+        
+        /* ===== Status Colors ===== */
+        .status-success .widget-icon,
+        .status-success .widget-value {
+            color: var(--secondary-color);
+        }
+        
+        .status-warning .widget-icon,
+        .status-warning .widget-value {
+            color: var(--warning-color);
+        }
+        
+        .status-danger .widget-icon,
+        .status-danger .widget-value {
+            color: var(--danger-color);
+        }
+        
+        .status-info .widget-icon,
+        .status-info .widget-value {
+            color: var(--primary-color);
+        }
+        
+        /* ===== Empty State ===== */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: var(--card-bg);
+            border-radius: 15px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .empty-state i {
+            font-size: 4em;
+            color: var(--border-color);
+            margin-bottom: 20px;
+        }
+        
+        .empty-state h2 {
+            color: var(--text-color);
+            margin-bottom: 10px;
+        }
+        
+        .empty-state p {
+            color: var(--text-color);
+            opacity: 0.7;
+        }
+        
+        /* ===== Footer ===== */
+        footer {
+            text-align: center;
+            padding: 40px 20px 20px 20px;
+            color: var(--text-color);
+            opacity: 0.6;
+            font-size: 0.9em;
+        }
+        
+        /* ===== Responsive Design ===== */
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2em;
+            }
+            
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .widget-card {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header>
+        <h1>{{ bot_name }}</h1>
+        <p>דשבורד ניהול וניטור מערכת</p>
+    </header>
+    
+    <!-- Main Container -->
+    <div class="container">
+        {% if widgets %}
+            <!-- Dashboard Grid -->
+            <div class="dashboard-grid">
+                {% for widget in widgets %}
+                <div class="widget-card status-{{ widget.status }}">
+                    <!-- Widget Header -->
+                    <div class="widget-header">
+                        <div class="widget-title">{{ widget.title }}</div>
+                        <i class="widget-icon bi {{ widget.icon }}"></i>
+                    </div>
+                    
+                    <!-- Widget Content -->
+                    <div class="widget-content">
+                        <div class="widget-value">{{ widget.value }}</div>
+                        <div class="widget-label">{{ widget.label }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <!-- Empty State -->
+            <div class="empty-state">
+                <i class="bi bi-inbox"></i>
+                <h2>אין פלאגינים פעילים</h2>
+                <p>הוסף פלאגינים בקובץ config.py כדי להתחיל</p>
+            </div>
+        {% endif %}
+    </div>
+    
+    <!-- Footer -->
+    <footer>
+        <p>Powered by Modular Bot V2 | © 2025</p>
+    </footer>
+</body>
+</html>
