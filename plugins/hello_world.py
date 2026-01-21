@@ -25,6 +25,12 @@ def get_dashboard_widget():
     }
 
 
+def handle_message(text):
+    if text == "/start":
+        return "שלום! אני בוט מודולרי שרץ על המנוע החדש שלך 🚀"
+    return None
+
+
 # ניתן להוסיף פונקציות נוספות לצורך פנימי
 def _internal_check():
     """פונקציה פנימית לדוגמה - לא תיקרא מהמנוע"""
