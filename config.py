@@ -23,6 +23,7 @@ class Config:
     # הוסף או הסר פלאגינים מכאן
     ENABLED_PLUGINS = [
         "hello_world",
+        "github_manager"  # הוספנו את זה!
     ]
     
     # הגדרות נוספות
