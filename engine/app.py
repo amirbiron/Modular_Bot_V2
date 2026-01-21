@@ -3,7 +3,7 @@ Engine - ליבת המערכת
 מנוע Flask עם טעינה דינמית של פלאגינים
 """
 
-from flask import Flask, render_template
+from flask import Flask, render_template, redirect, url_for
 import importlib
 import sys
 import os
@@ -21,10 +21,19 @@ from config import Config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
+STATIC_DIR = PROJECT_ROOT / "static"
 
 # Flask defaults to searching for templates relative to this module/package.
 # In this repo templates live at "<project_root>/templates", so we set it explicitly.
-app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
+#
+# We also explicitly set a project-level static directory so Render/Flask can serve assets
+# like favicon files from "<project_root>/static".
+app = Flask(
+    __name__,
+    template_folder=str(TEMPLATES_DIR),
+    static_folder=str(STATIC_DIR),
+    static_url_path="/static",
+)
 app.config.from_object(Config)
 
 
@@ -75,6 +84,17 @@ def dashboard():
     return render_template('index.html', 
                           widgets=widgets, 
                           bot_name=Config.BOT_NAME)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """
+    Handle default browser favicon requests.
+
+    Many browsers request "/favicon.ico" even when the HTML declares a different icon.
+    We redirect to our SVG favicon to avoid 404 noise in logs.
+    """
+    return redirect(url_for("static", filename="favicon.svg"))
 
 
 @app.route('/health')
