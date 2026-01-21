@@ -7,6 +7,7 @@ from flask import Flask, render_template
 import importlib
 import sys
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # טעינת משתני סביבה מקובץ .env (אם קיים)
@@ -18,7 +19,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
 
-app = Flask(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TEMPLATES_DIR = PROJECT_ROOT / "templates"
+
+# Flask defaults to searching for templates relative to this module/package.
+# In this repo templates live at "<project_root>/templates", so we set it explicitly.
+app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 app.config.from_object(Config)
 
 
