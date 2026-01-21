@@ -30,6 +30,36 @@ app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 app.config.from_object(Config)
 
 
+def set_webhook():
+    """
+    רישום webhook לטלגרם בעת עליית השרת.
+    """
+    token = os.environ.get("TELEGRAM_TOKEN")
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if not token or not render_url:
+        print("⚠️ Telegram webhook not set: missing TELEGRAM_TOKEN or RENDER_EXTERNAL_URL")
+        return False
+
+    webhook_url = f"{render_url.rstrip('/')}/{token}"
+    api_url = f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}"
+
+    try:
+        response = requests.get(api_url, timeout=10)
+        if response.ok:
+            print("✅ Telegram webhook set successfully")
+        else:
+            print(f"❌ Failed setting Telegram webhook: {response.status_code} {response.text}")
+        return response.ok
+    except Exception as e:
+        print(f"❌ Error setting Telegram webhook: {e}")
+        return False
+
+
+# Register webhook once on server startup
+set_webhook()
+
+
 def load_plugins():
     """
     טוען דינמית את כל הפלאגינים המופעלים
