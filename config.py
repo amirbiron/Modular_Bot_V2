@@ -9,6 +9,11 @@ from dotenv import load_dotenv
 # טעינת משתני סביבה מקובץ .env (אם קיים)
 load_dotenv()
 
+# Telegram / Render
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Render provides this automatically (e.g. https://<service>.onrender.com)
+WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
 
 class Config:
     """הגדרות כלליות לדשבורד הבוט"""
@@ -30,3 +35,11 @@ class Config:
     # מצב Debug - False בסביבת ייצור
     DEBUG = os.environ.get("DEBUG", "True").lower() in ("true", "1", "yes")
     HOST = "0.0.0.0"
+
+    # Telegram / Render
+    TELEGRAM_TOKEN = TELEGRAM_TOKEN
+    WEBHOOK_URL = WEBHOOK_URL
+
+
+# Convenience module-level aliases (for engine/app.py usage)
+ENABLED_PLUGINS = Config.ENABLED_PLUGINS
