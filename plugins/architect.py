@@ -241,6 +241,46 @@ def _create_inline_keyboard(buttons):
     }
 
 
+def _notify_admin(message, error_type="general"):
+    """
+    שולח התראה לאדמין בטלגרם.
+    
+    Args:
+        message: תוכן ההתראה
+        error_type: סוג השגיאה (quota, api_error, general)
+    """
+    admin_chat_id = Config.ADMIN_CHAT_ID
+    telegram_token = os.environ.get("TELEGRAM_TOKEN")
+    
+    if not admin_chat_id or not telegram_token:
+        print(f"⚠️ Admin notification skipped (missing ADMIN_CHAT_ID or TELEGRAM_TOKEN): {message}")
+        return
+    
+    # הוספת אייקון לפי סוג השגיאה
+    icons = {
+        "quota": "🚨",
+        "api_error": "⚠️",
+        "general": "ℹ️",
+    }
+    icon = icons.get(error_type, "ℹ️")
+    
+    full_message = f"{icon} *התראת מערכת - Architect*\n\n{message}"
+    
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{telegram_token}/sendMessage",
+            json={
+                "chat_id": admin_chat_id,
+                "text": full_message,
+                "parse_mode": "Markdown"
+            },
+            timeout=10
+        )
+        print(f"✅ Admin notified: {error_type}")
+    except Exception as e:
+        print(f"❌ Failed to notify admin: {e}")
+
+
 def _update_local_registry(bot_token, plugin_filename):
     """
     מעדכן את קובץ הרישום המקומי (לא רק בגיטהאב).
@@ -351,6 +391,7 @@ def _extract_claude_code(payload):
 def _generate_plugin_code(name, instruction):
     api_key = Config.ANTHROPIC_API_KEY
     if not api_key:
+        _notify_admin("חסר ANTHROPIC_API_KEY בקונפיגורציה!", "api_error")
         return None, "חסר ANTHROPIC_API_KEY בקונפיגורציה."
 
     user_prompt = _build_user_prompt(name, instruction)
@@ -367,13 +408,78 @@ def _generate_plugin_code(name, instruction):
             json=data,
             timeout=120,
         )
+        
+        # בדיקת שגיאות ספציפיות לפני raise_for_status
+        if response.status_code == 429:
+            # Rate limit / Quota exceeded
+            error_details = ""
+            try:
+                error_json = response.json()
+                error_details = error_json.get("error", {}).get("message", response.text)
+            except Exception:
+                error_details = response.text
+            
+            _notify_admin(
+                f"*נגמרה מכסת הטוקנים של Claude API!*\n\n"
+                f"סטטוס: 429 Rate Limited\n"
+                f"פרטים: {error_details[:500]}",
+                "quota"
+            )
+            return None, "🚫 המערכת עמוסה כרגע. נסה שוב מאוחר יותר."
+        
+        elif response.status_code == 401:
+            # Invalid API key
+            _notify_admin(
+                f"*מפתח API של Claude לא תקין!*\n\n"
+                f"סטטוס: 401 Unauthorized\n"
+                f"יש לבדוק את ANTHROPIC_API_KEY",
+                "api_error"
+            )
+            return None, "שגיאת הזדהות במערכת. נסה שוב מאוחר יותר."
+        
+        elif response.status_code == 400:
+            # Bad request - might be billing issue
+            error_details = ""
+            try:
+                error_json = response.json()
+                error_details = error_json.get("error", {}).get("message", response.text)
+            except Exception:
+                error_details = response.text
+            
+            # בדיקה אם זו בעיית חיוב
+            if "credit" in error_details.lower() or "billing" in error_details.lower():
+                _notify_admin(
+                    f"*בעיית חיוב ב-Claude API!*\n\n"
+                    f"סטטוס: 400\n"
+                    f"פרטים: {error_details[:500]}",
+                    "quota"
+                )
+                return None, "🚫 המערכת לא זמינה כרגע. נסה שוב מאוחר יותר."
+        
+        elif response.status_code >= 500:
+            # Server error
+            _notify_admin(
+                f"*שגיאת שרת ב-Claude API*\n\n"
+                f"סטטוס: {response.status_code}\n"
+                f"השירות לא זמין זמנית",
+                "api_error"
+            )
+            return None, "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
+        
         response.raise_for_status()
+        
     except requests.RequestException as e:
         print(f"Claude API RequestException: {e}")
         try:
             print(f"Claude API Response: {response.text}")
         except Exception:
             pass
+        
+        _notify_admin(
+            f"*שגיאת חיבור ל-Claude API*\n\n"
+            f"שגיאה: {str(e)[:300]}",
+            "api_error"
+        )
         return None, "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
 
     try:
