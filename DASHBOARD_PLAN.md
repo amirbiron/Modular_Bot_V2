@@ -41,8 +41,13 @@
   "bot_token_id": null,              // מתמלא כשמקבלים טוקן
   "created_at": ISODate(...),
   "updated_at": ISODate(...),
-  "completed_at": null,              // מתמלא בסיום (הצלחה/כישלון/ביטול)
-  "final_status": null               // "created" | "failed" | "cancelled"
+  "completed_at": null,              // מתמלא בסיום אמיתי (activated/failed/cancelled)
+  "final_status": null,              // "activated" | "failed" | "cancelled" (לא "created"!)
+  "stage_times": {                   // 🆕 לחישוב זמן בכל שלב
+    "stage_1_at": ISODate(...),
+    "stage_2_at": ISODate(...),
+    // ...
+  }
 }
 ```
 
@@ -141,6 +146,19 @@ def _update_flow(flow_id, **updates):
 | `creation_failed` | כישלון יצירה (יכול לנסות שוב) |
 | `flow_cancelled` | ביטול |
 
+### 1.2.1 📛 קונבנציית שמות אירועים
+
+**עיקרון:** שמות קצרים וברורים, ללא prefix מיותר.
+
+| ✅ נכון | ❌ לא נכון |
+|---------|-----------|
+| `flow_started` | `requested_bot` |
+| `token_accepted` | `submitted_token` |
+| `creation_failed` | `bot_creation_failed` |
+| `bot_activated_by_creator` | `bot_first_message` |
+
+**הסיבה:** עקביות בקוד ובשאילתות. כל האירועים משתמשים באותו סט שמות.
+
 ### 1.3 שינויים נדרשים בקוד
 
 #### א. פונקציות ניהול Flow (`architect.py`)
@@ -181,22 +199,37 @@ def _create_flow(user_id):
 def _update_flow(flow_id, status=None, stage=None, bot_token_id=None, final_status=None):
     """
     מעדכן flow קיים ב-DB.
+    כולל State Machine Guardrails למניעת רגרסיה!
     """
     db = _get_mongo_db()
     if db is None or not flow_id:
         return
     
-    updates = {"updated_at": datetime.utcnow()}
+    now = datetime.utcnow()
+    updates = {"updated_at": now}
     
     if status:
         updates["status"] = status
-    if stage:
-        updates["current_stage"] = stage
+    
     if bot_token_id:
         updates["bot_token_id"] = bot_token_id
+    
     if final_status:
         updates["final_status"] = final_status
-        updates["completed_at"] = datetime.utcnow()
+        updates["completed_at"] = now
+    
+    # 🛡️ Stage Guardrail: רק קדימה, לא אחורה!
+    # מונע נתוני Funnel מוזרים מבאגים או הודעות כפולות
+    if stage:
+        # שולפים את ה-stage הנוכחי
+        current_flow = db.bot_flows.find_one({"_id": flow_id}, {"current_stage": 1})
+        current_stage = current_flow.get("current_stage", 0) if current_flow else 0
+        
+        # רק אם השלב החדש גדול יותר (או שזה failed/cancelled)
+        if stage > current_stage or final_status in ("failed", "cancelled"):
+            updates["current_stage"] = stage
+            # 🕐 שמירת timestamp לשלב (לחישוב זמן בכל שלב)
+            updates[f"stage_times.stage_{stage}_at"] = now
     
     db.bot_flows.update_one({"_id": flow_id}, {"$set": updates})
 
@@ -384,7 +417,8 @@ def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
     ...
     
     # אחרי הצלחה:
-    _update_flow(flow_id, status="created", stage=4, final_status="created")
+    # ⚠️ חשוב: לא לסגור final_status כאן! Activation הוא חלק מהמשפך
+    _update_flow(flow_id, status="created", stage=4)  # בלי final_status!
     log_funnel_event(user_id, "bot_created", flow_id=flow_id, 
                     bot_token_id=bot_token_id,
                     unique_key=f"created_{flow_id}")
@@ -531,20 +565,26 @@ def get_funnel_stats():
     מחזיר סטטיסטיקות משפך ההמרה.
     Query params:
         - days: מספר ימים אחורה (ברירת מחדל: 7)
+        - window: "start" (cohort לפי התחלה) או "activity" (פעילות אחרונה)
     
     🆕 שיפור: מחשב משפך אמיתי מ-bot_flows (לא מאירועים!)
     """
     days = request.args.get('days', 7, type=int)
+    window = request.args.get('window', 'start')  # 🆕 בחירת חלון זמן
     since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
     
     db = get_mongo_db()
     if db is None:
         return {"error": "Database not connected"}, 500
     
-    # 🆕 שאילתה מ-bot_flows - מקור האמת!
-    # מחשבים כמה flows הגיעו לכל שלב (לפי current_stage)
+    # 🆕 בחירת שדה הסינון לפי window
+    # start = cohorts (flows שהתחילו בתקופה)
+    # activity = מה קורה עכשיו (flows שהיו פעילים בתקופה)
+    time_field = "created_at" if window == "start" else "updated_at"
+    
+    # שאילתה מ-bot_flows - מקור האמת!
     pipeline = [
-        {"$match": {"created_at": {"$gte": since}}},
+        {"$match": {time_field: {"$gte": since}}},
         {"$group": {
             "_id": None,
             "total_flows": {"$sum": 1},
@@ -679,7 +719,7 @@ def get_funnel_errors():
     
     pipeline = [
         {"$match": {
-            "event_type": "bot_creation_failed",
+            "event_type": "creation_failed",  # 🆕 תואם לשם האירוע בקוד
             "timestamp": {"$gte": since}
         }},
         {"$group": {
@@ -793,6 +833,9 @@ def get_funnel_errors():
         <button onclick="loadFunnel()">🔄 רענן</button>
     </div>
     
+    <!-- 🆕 סיכום מספרים -->
+    <div id="funnel-summary"></div>
+    
     <!-- 📊 Chart.js Canvas - הרבה יותר מרשים מ-HTML bars! -->
     <canvas id="funnelChart" style="max-height: 400px;"></canvas>
     
@@ -833,16 +876,64 @@ function setGroupBy(mode) {
 
 async function loadFunnel() {
     const days = document.getElementById('funnel-period').value;
+    const adminToken = localStorage.getItem('dashboardAdminToken') || '';
     
-    const response = await fetch(`/api/funnel?days=${days}&by=${groupBy}`);
+    const headers = adminToken ? {'X-Admin-Token': adminToken} : {};
+    
+    // 🆕 API V2 - window parameter (start=cohorts, activity=current)
+    const response = await fetch(`/api/funnel?days=${days}&window=start`, {headers});
+    
+    if (response.status === 401) {
+        promptForToken();
+        return;
+    }
+    
     const data = await response.json();
     
     renderFunnelChart(data.funnel);
-    renderDropOffs(data.drop_offs);
+    renderDropOffs(data.funnel);  // 🆕 חישוב מהמשפך
+    renderSummary(data.summary);  // 🆕 סיכום חדש
     
-    const errorsResponse = await fetch(`/api/funnel/errors?days=${days}`);
+    const errorsResponse = await fetch(`/api/funnel/errors?days=${days}`, {headers});
     const errorsData = await errorsResponse.json();
     renderErrors(errorsData.top_errors);
+}
+
+// 🆕 הצגת סיכום
+function renderSummary(summary) {
+    if (!summary) return;
+    const container = document.getElementById('funnel-summary');
+    if (!container) return;
+    
+    container.innerHTML = `
+        <div class="summary-grid">
+            <div class="summary-item">
+                <span class="summary-value">${summary.total_flows}</span>
+                <span class="summary-label">ניסיונות</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-value">${summary.unique_users}</span>
+                <span class="summary-label">משתמשים</span>
+            </div>
+            <div class="summary-item success">
+                <span class="summary-value">${summary.overall_success_rate}%</span>
+                <span class="summary-label">הצלחה כוללת</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-value">${summary.avg_attempts_per_user}</span>
+                <span class="summary-label">ניסיונות/משתמש</span>
+            </div>
+        </div>
+    `;
+}
+
+// 🔐 בקשת טוקן אדמין
+function promptForToken() {
+    const token = prompt('הזן טוקן אדמין לגישה לדשבורד:');
+    if (token) {
+        localStorage.setItem('dashboardAdminToken', token);
+        loadFunnel();
+    }
 }
 
 function renderFunnelChart(stages) {
@@ -853,10 +944,11 @@ function renderFunnelChart(stages) {
         currentChart.destroy();
     }
     
-    // הכנת נתונים
-    const labels = stages.map(s => stageNames[s.stage] || s.stage);
-    const data = stages.map(s => s.unique_count);
-    const percentages = stages.map(s => s.conversion_rate);
+    // 🆕 תואם ל-API V2!
+    // API מחזיר: count, step_conversion, overall_conversion, label
+    const labels = stages.map(s => s.label || stageNames[s.stage] || s.stage);
+    const data = stages.map(s => s.count);  // 🆕 היה unique_count
+    const percentages = stages.map(s => s.overall_conversion);  // 🆕 היה conversion_rate
     
     // צבעים בגרדיאנט - מכחול לירוק
     const colors = stages.map((_, i) => {
@@ -910,22 +1002,33 @@ function renderFunnelChart(stages) {
     });
 }
 
-function renderDropOffs(dropOffs) {
+function renderDropOffs(funnelData) {
     const container = document.getElementById('drop-offs');
-    if (!dropOffs || dropOffs.length === 0) {
-        container.innerHTML = '<p>אין נתוני נשירה משמעותיים</p>';
+    
+    // 🆕 חישוב נשירה מתוך נתוני המשפך (לא מ-API נפרד)
+    const dropOffs = funnelData
+        .filter(s => s.drop_off > 0)
+        .sort((a, b) => b.drop_off - a.drop_off)
+        .slice(0, 3);  // טופ 3 נקודות נשירה
+    
+    if (dropOffs.length === 0) {
+        container.innerHTML = '<p>אין נתוני נשירה משמעותיים 🎉</p>';
         return;
     }
     
-    container.innerHTML = dropOffs.map(d => `
-        <div class="drop-off-item">
-            <span class="drop-off-count">${d.count}</span>
-            <span class="drop-off-text">
-                נשרו בין "${stageNames[d.from_stage]}" ל"${stageNames[d.to_stage]}"
-                <span class="drop-off-percent">(${d.drop_rate}% נשירה)</span>
-            </span>
-        </div>
-    `).join('');
+    container.innerHTML = dropOffs.map((d, i) => {
+        const prevStage = funnelData[funnelData.indexOf(d) - 1];
+        const dropRate = prevStage ? Math.round((d.drop_off / prevStage.count) * 100) : 0;
+        return `
+            <div class="drop-off-item">
+                <span class="drop-off-count">${d.drop_off}</span>
+                <span class="drop-off-text">
+                    נשרו לפני "${d.label}"
+                    <span class="drop-off-percent">(${dropRate}% נשירה)</span>
+                </span>
+            </div>
+        `;
+    }).join('');
 }
 
 function renderErrors(errors) {
@@ -1001,6 +1104,47 @@ document.addEventListener('DOMContentLoaded', loadFunnel);
     color: var(--danger-color);
     font-size: 0.9em;
 }
+
+/* 🆕 Summary Grid */
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.summary-item {
+    background: rgba(255,255,255,0.05);
+    padding: 15px;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.summary-item.success {
+    background: rgba(75, 192, 192, 0.2);
+}
+
+.summary-value {
+    display: block;
+    font-size: 2em;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.summary-item.success .summary-value {
+    color: var(--secondary-color);
+}
+
+.summary-label {
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+@media (max-width: 768px) {
+    .summary-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
 ```
 
 ---
@@ -1063,11 +1207,21 @@ DASHBOARD_ADMIN_TOKEN=your-secret-token-here
 // אינדקס לשאילתות לפי משתמש ו-flows פעילים
 db.bot_flows.createIndex({user_id: 1, final_status: 1})
 
-// אינדקס לשאילתות לפי bot_token_id (ל-Activation lookup)
-db.bot_flows.createIndex({bot_token_id: 1})
+// 🔑 Partial Unique Index על bot_token_id (רק כשקיים!)
+// מונע שני flows לאותו בוט + מונע Enrichment שגוי
+db.bot_flows.createIndex(
+  {bot_token_id: 1}, 
+  {
+    unique: true, 
+    partialFilterExpression: {bot_token_id: {$type: "string"}}
+  }
+)
 
 // אינדקס לשאילתות לפי זמן (למשפך)
 db.bot_flows.createIndex({created_at: -1})
+
+// אינדקס לשאילתות לפי updated_at (למשפך "מה קורה עכשיו")
+db.bot_flows.createIndex({updated_at: -1})
 
 // אינדקס לסטטוס (לספירת הצלחות/כישלונות)
 db.bot_flows.createIndex({current_stage: 1, created_at: -1})
@@ -1092,6 +1246,11 @@ db.funnel_events.createIndex({bot_token_id: 1, event_type: 1})
 // "_id": "activation_f_abc123" - מונע כפילויות של activation
 // "_id": "created_f_abc123" - מונע כפילויות של created
 // וכו'
+
+// הסבר ה-Partial Unique Index:
+// - bot_token_id יכול להיות null בתחילת ה-flow (לפני שקיבלנו טוקן)
+// - הייחודיות נבדקת רק כש-bot_token_id הוא string (לא null)
+// - מונע מצב של שני flows שונים לאותו בוט
 ```
 
 ### 🎈 מניעת Data Bloat - TTL Index
