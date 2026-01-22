@@ -181,6 +181,38 @@ def bot_exists_in_db(bot_token):
         return False
 
 
+def log_user_action(user_id, action_type, bot_token=None, details=None):
+    """
+    רושם פעולת משתמש ב-MongoDB לצורכי אנליטיקס.
+    
+    Args:
+        user_id: מזהה המשתמש בטלגרם
+        action_type: סוג הפעולה (message, callback, command)
+        bot_token: טוקן הבוט (אופציונלי, מוסתר חלקית)
+        details: פרטים נוספים (אופציונלי)
+    """
+    db = get_mongo_db()
+    if db is None:
+        return
+    
+    try:
+        # הסתרת חלק מהטוקן לאבטחה
+        safe_bot_id = None
+        if bot_token and ':' in bot_token:
+            safe_bot_id = bot_token.split(':')[0]
+        
+        db.user_actions.insert_one({
+            "user_id": user_id,
+            "action_type": action_type,
+            "bot_id": safe_bot_id,
+            "details": details,
+            "timestamp": __import__('datetime').datetime.utcnow()
+        })
+    except Exception as e:
+        # לא נכשיל את הבקשה בגלל לוג
+        print(f"⚠️ Failed to log user action: {e}")
+
+
 def load_plugin_by_name(plugin_name):
     """
     טוען פלאגין ספציפי לפי שם.
@@ -371,6 +403,9 @@ def telegram_webhook(bot_token):
         if chat_id is None:
             return {"ok": True}
         
+        # רישום פעולת משתמש לאנליטיקס
+        log_user_action(user_id, "callback", bot_token, {"data": callback_data})
+        
         # ענה על ה-callback query כדי להסיר את ה"שעון חול"
         answer_callback_query(bot_token, callback_id)
         
@@ -424,6 +459,10 @@ def telegram_webhook(bot_token):
     user_id = (message.get("from") or {}).get("id")
     if chat_id is None:
         return {"ok": True}
+
+    # רישום פעולת משתמש לאנליטיקס
+    action_type = "command" if text.startswith("/") else "message"
+    log_user_action(user_id, action_type, bot_token, {"text_preview": text[:50] if text else None})
 
     # בדיקה אם זה הטוקן הראשי (הבוט המקורי)
     if config.TELEGRAM_TOKEN and bot_token == config.TELEGRAM_TOKEN:

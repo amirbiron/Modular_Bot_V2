@@ -86,7 +86,8 @@ START_MESSAGE = """🤖 *ברוכים הבאים למפעל הבוטים!*
 *פקודות זמינות:*
 /start - תפריט ראשי
 /create\\_bot - יצירת בוט חדש (עם כפתורים)
-/cancel - ביטול תהליך יצירה"""
+/cancel - ביטול תהליך יצירה
+/stats - סטטיסטיקות (אדמין בלבד)"""
 
 WAITING_TOKEN_MESSAGE = """🔑 *שלב 1: שליחת הטוקן*
 
@@ -369,6 +370,99 @@ def _bot_exists_in_mongodb(bot_token):
     except Exception as e:
         print(f"❌ Error checking bot in MongoDB: {e}")
         return False
+
+
+def _get_admin_stats(user_id):
+    """
+    מחזיר סטטיסטיקות מערכת - לאדמין בלבד.
+    
+    Args:
+        user_id: מזהה המשתמש
+    
+    Returns:
+        dict או str: תגובה עם סטטיסטיקות או הודעת שגיאה
+    """
+    # בדיקת הרשאות אדמין
+    admin_chat_id = Config.ADMIN_CHAT_ID
+    if not admin_chat_id or str(user_id) != str(admin_chat_id):
+        return "⛔ פקודה זו זמינה לאדמין בלבד."
+    
+    db = _get_mongo_db()
+    if db is None:
+        return "❌ MongoDB לא מוגדר. אין גישה לסטטיסטיקות."
+    
+    try:
+        # חישוב תאריך לפני שבוע
+        one_week_ago = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+        
+        # ספירת משתמשים ייחודיים בשבוע האחרון
+        unique_users_pipeline = [
+            {"$match": {"timestamp": {"$gte": one_week_ago}}},
+            {"$group": {"_id": "$user_id"}},
+            {"$count": "total"}
+        ]
+        unique_users_result = list(db.user_actions.aggregate(unique_users_pipeline))
+        unique_users_count = unique_users_result[0]["total"] if unique_users_result else 0
+        
+        # סה"כ פעולות בשבוע האחרון
+        total_actions = db.user_actions.count_documents({"timestamp": {"$gte": one_week_ago}})
+        
+        # פעולות לפי סוג
+        actions_by_type_pipeline = [
+            {"$match": {"timestamp": {"$gte": one_week_ago}}},
+            {"$group": {"_id": "$action_type", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        actions_by_type = list(db.user_actions.aggregate(actions_by_type_pipeline))
+        
+        # טופ 10 משתמשים פעילים
+        top_users_pipeline = [
+            {"$match": {"timestamp": {"$gte": one_week_ago}}},
+            {"$group": {"_id": "$user_id", "actions": {"$sum": 1}}},
+            {"$sort": {"actions": -1}},
+            {"$limit": 10}
+        ]
+        top_users = list(db.user_actions.aggregate(top_users_pipeline))
+        
+        # מספר בוטים רשומים
+        total_bots = db.bot_registry.count_documents({})
+        
+        # בניית ההודעה
+        stats_message = f"""📊 *סטטיסטיקות מערכת - 7 ימים אחרונים*
+
+👥 *משתמשים:*
+• משתמשים ייחודיים: {unique_users_count}
+• סה"כ פעולות: {total_actions}
+
+🤖 *בוטים רשומים:* {total_bots}
+
+📈 *פעולות לפי סוג:*"""
+        
+        for action in actions_by_type:
+            action_type = action["_id"] or "unknown"
+            count = action["count"]
+            emoji = {"command": "⌨️", "message": "💬", "callback": "🔘"}.get(action_type, "•")
+            stats_message += f"\n{emoji} {action_type}: {count}"
+        
+        stats_message += "\n\n🏆 *משתמשים פעילים (טופ 10):*"
+        
+        for i, user in enumerate(top_users, 1):
+            user_id_display = user["_id"]
+            actions_count = user["actions"]
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+            stats_message += f"\n{medal} `{user_id_display}` - {actions_count} פעולות"
+        
+        if not top_users:
+            stats_message += "\nאין נתונים עדיין"
+        
+        return {
+            "text": stats_message,
+            "parse_mode": "Markdown"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting stats: {e}")
+        return f"❌ שגיאה בשליפת סטטיסטיקות: {e}"
 
 
 def get_dashboard_widget():
@@ -764,6 +858,10 @@ def handle_message(text, user_id=None):
                 [{"text": "🚀 צור בוט חדש", "callback_data": "create_bot"}]
             ])
         }
+    
+    # פקודת /stats - סטטיסטיקות (לאדמין בלבד)
+    if stripped == "/stats":
+        return _get_admin_stats(user_id)
     
     # פקודת /cancel - ביטול תהליך
     if stripped == "/cancel":
