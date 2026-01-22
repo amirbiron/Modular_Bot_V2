@@ -10,11 +10,13 @@ import importlib
 import sys
 import os
 import traceback
+import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
+from functools import wraps
 
 # טעינת משתני סביבה מקובץ .env (אם קיים)
 load_dotenv()
@@ -34,6 +36,10 @@ PLUGINS_CACHE = {}
 # MongoDB connection
 _mongo_client = None
 _mongo_db = None
+_funnel_indexes_ready = False
+_funnel_cache = {}
+_errors_cache = {}
+_CACHE_TTL_SECONDS = 60
 
 
 def get_mongo_db():
@@ -56,6 +62,7 @@ def get_mongo_db():
         # בדיקת חיבור
         _mongo_client.admin.command('ping')
         _mongo_db = _mongo_client.get_database("bot_factory")
+        _ensure_funnel_indexes(_mongo_db)
         print("✅ MongoDB connected successfully")
         return _mongo_db
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
@@ -64,6 +71,58 @@ def get_mongo_db():
     except Exception as e:
         print(f"❌ MongoDB error: {e}")
         return None
+
+
+def _ensure_funnel_indexes(db):
+    """
+    יוצר אינדקסים נדרשים למשפך ההמרה (Idempotent).
+    """
+    global _funnel_indexes_ready
+    
+    if _funnel_indexes_ready or db is None:
+        return
+    
+    try:
+        # === bot_flows ===
+        db.bot_flows.create_index([("user_id", 1), ("final_status", 1)])
+        db.bot_flows.create_index(
+            [("bot_token_id", 1)],
+            unique=True,
+            partialFilterExpression={"bot_token_id": {"$type": "string"}}
+        )
+        db.bot_flows.create_index([("created_at", -1)])
+        db.bot_flows.create_index([("updated_at", -1)])
+        db.bot_flows.create_index([("current_stage", 1), ("created_at", -1)])
+        
+        # === funnel_events ===
+        db.funnel_events.create_index([("timestamp", -1), ("event_type", 1)])
+        db.funnel_events.create_index([("flow_id", 1), ("event_type", 1)])
+        db.funnel_events.create_index([("bot_token_id", 1), ("event_type", 1)])
+        db.funnel_events.create_index(
+            [("timestamp", 1)],
+            expireAfterSeconds=7776000
+        )
+        
+        _funnel_indexes_ready = True
+    except Exception as e:
+        print(f"⚠️ Failed to ensure funnel indexes: {e}")
+
+
+def _get_cached_value(cache, key):
+    now = datetime.datetime.utcnow().timestamp()
+    entry = cache.get(key)
+    if entry and (now - entry["timestamp"]) < _CACHE_TTL_SECONDS:
+        return entry["data"]
+    if entry:
+        cache.pop(key, None)
+    return None
+
+
+def _set_cached_value(cache, key, data):
+    cache[key] = {
+        "timestamp": datetime.datetime.utcnow().timestamp(),
+        "data": data
+    }
 
 # Flask defaults to searching for templates relative to this module/package.
 # In this repo templates live at "<project_root>/templates", so we set it explicitly.
@@ -213,6 +272,57 @@ def log_user_action(user_id, action_type, bot_token=None, details=None):
         print(f"⚠️ Failed to log user action: {e}")
 
 
+def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None,
+                     metadata=None, unique_key=None):
+    """
+    רושם אירוע במשפך ההמרה.
+    
+    Args:
+        user_id: מזהה המשתמש בטלגרם
+        event_type: סוג האירוע
+        flow_id: מזהה ייחודי לניסיון היצירה
+        bot_token_id: מזהה הבוט
+        metadata: מידע נוסף (dict)
+        unique_key: מפתח ייחודי למניעת כפילויות (אופציונלי)
+    """
+    db = get_mongo_db()
+    if db is None:
+        return False
+    
+    try:
+        doc = {
+            "user_id": str(user_id),
+            "event_type": event_type,
+            "timestamp": datetime.datetime.utcnow()
+        }
+        
+        if unique_key:
+            doc["_id"] = unique_key
+        
+        if flow_id:
+            doc["flow_id"] = flow_id
+        if bot_token_id:
+            doc["bot_token_id"] = bot_token_id
+        if metadata:
+            doc["metadata"] = metadata
+        
+        if unique_key:
+            db.funnel_events.update_one(
+                {"_id": unique_key},
+                {"$setOnInsert": doc},
+                upsert=True
+            )
+        else:
+            db.funnel_events.insert_one(doc)
+        
+        return True
+    except DuplicateKeyError:
+        return False
+    except Exception as e:
+        print(f"⚠️ Failed to log funnel event: {e}")
+        return False
+
+
 def load_plugin_by_name(plugin_name):
     """
     טוען פלאגין ספציפי לפי שם.
@@ -320,6 +430,166 @@ def dashboard():
     return render_template('index.html', 
                           widgets=widgets, 
                           bot_name=Config.BOT_NAME)
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_token = request.headers.get('X-Admin-Token')
+        expected_token = os.environ.get('DASHBOARD_ADMIN_TOKEN')
+        
+        if not expected_token:
+            pass
+        elif auth_token != expected_token:
+            return {"error": "Unauthorized"}, 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+@app.route('/api/funnel')
+@admin_required
+def get_funnel_stats():
+    """
+    מחזיר סטטיסטיקות משפך ההמרה.
+    Query params:
+        - days: מספר ימים אחורה (ברירת מחדל: 7)
+        - window: "start" (cohort לפי התחלה) או "activity" (פעילות אחרונה)
+    """
+    days = request.args.get('days', 7, type=int)
+    window = request.args.get('window', 'start')
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    
+    cache_key = f"{days}:{window}"
+    cached = _get_cached_value(_funnel_cache, cache_key)
+    if cached:
+        return cached
+    
+    db = get_mongo_db()
+    if db is None:
+        return {"error": "Database not connected"}, 500
+    
+    time_field = "created_at" if window == "start" else "updated_at"
+    
+    pipeline = [
+        {"$match": {time_field: {"$gte": since}}},
+        {"$group": {
+            "_id": None,
+            "total_flows": {"$sum": 1},
+            "reached_stage_1": {"$sum": {"$cond": [{"$gte": ["$current_stage", 1]}, 1, 0]}},
+            "reached_stage_2": {"$sum": {"$cond": [{"$gte": ["$current_stage", 2]}, 1, 0]}},
+            "reached_stage_3": {"$sum": {"$cond": [{"$gte": ["$current_stage", 3]}, 1, 0]}},
+            "reached_stage_4": {"$sum": {"$cond": [{"$gte": ["$current_stage", 4]}, 1, 0]}},
+            "reached_stage_5": {"$sum": {"$cond": [{"$gte": ["$current_stage", 5]}, 1, 0]}},
+            "cancelled": {"$sum": {"$cond": [{"$eq": ["$final_status", "cancelled"]}, 1, 0]}},
+            "failed": {"$sum": {"$cond": [{"$eq": ["$final_status", "failed"]}, 1, 0]}},
+            "unique_users": {"$addToSet": "$user_id"}
+        }}
+    ]
+    
+    results = list(db.bot_flows.aggregate(pipeline))
+    
+    if not results:
+        response_data = {
+            "period_days": days,
+            "total_flows": 0,
+            "funnel": [],
+            "summary": {}
+        }
+        _set_cached_value(_funnel_cache, cache_key, response_data)
+        return response_data
+    
+    data = results[0]
+    total = data.get("total_flows", 0)
+    
+    stages = [
+        {"name": "flow_started", "label": "התחילו תהליך", "count": data.get("reached_stage_1", 0)},
+        {"name": "token_accepted", "label": "שלחו טוקן תקין", "count": data.get("reached_stage_2", 0)},
+        {"name": "description_submitted", "label": "שלחו תיאור", "count": data.get("reached_stage_3", 0)},
+        {"name": "bot_created", "label": "הבוט נוצר", "count": data.get("reached_stage_4", 0)},
+        {"name": "bot_activated", "label": "הופעל ע\"י היוצר", "count": data.get("reached_stage_5", 0)},
+    ]
+    
+    funnel_data = []
+    for i, stage in enumerate(stages):
+        count = stage["count"]
+        prev_count = stages[i - 1]["count"] if i > 0 else count
+        
+        step_conversion = (count / prev_count * 100) if prev_count > 0 else 0
+        overall_conversion = (count / total * 100) if total > 0 else 0
+        
+        funnel_data.append({
+            "stage": stage["name"],
+            "label": stage["label"],
+            "count": count,
+            "step_conversion": round(step_conversion, 1),
+            "overall_conversion": round(overall_conversion, 1),
+            "drop_off": prev_count - count if i > 0 else 0
+        })
+    
+    summary = {
+        "total_flows": total,
+        "unique_users": len(data.get("unique_users", [])),
+        "successful_creations": data.get("reached_stage_4", 0),
+        "successful_activations": data.get("reached_stage_5", 0),
+        "cancelled": data.get("cancelled", 0),
+        "failed": data.get("failed", 0),
+        "overall_success_rate": round(
+            (data.get("reached_stage_5", 0) / total * 100) if total > 0 else 0, 1
+        ),
+        "avg_attempts_per_user": round(
+            total / len(data.get("unique_users", [1])), 2
+        ) if data.get("unique_users") else 0
+    }
+    
+    response_data = {
+        "period_days": days,
+        "funnel": funnel_data,
+        "summary": summary
+    }
+    _set_cached_value(_funnel_cache, cache_key, response_data)
+    return response_data
+
+
+@app.route('/api/funnel/errors')
+@admin_required
+def get_funnel_errors():
+    """
+    מחזיר סטטיסטיקות שגיאות נפוצות ביצירת בוטים.
+    """
+    days = request.args.get('days', 7, type=int)
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    
+    cache_key = f"{days}"
+    cached = _get_cached_value(_errors_cache, cache_key)
+    if cached:
+        return cached
+    
+    db = get_mongo_db()
+    if db is None:
+        return {"error": "Database not connected"}, 500
+    
+    pipeline = [
+        {"$match": {
+            "event_type": "creation_failed",
+            "timestamp": {"$gte": since}
+        }},
+        {"$group": {
+            "_id": "$metadata.error",
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"count": -1}},
+        {"$limit": 10}
+    ]
+    
+    results = list(db.funnel_events.aggregate(pipeline))
+    
+    response_data = {
+        "period_days": days,
+        "top_errors": [{"error": r["_id"], "count": r["count"]} for r in results]
+    }
+    _set_cached_value(_errors_cache, cache_key, response_data)
+    return response_data
 
 
 @app.route('/health')
@@ -635,6 +905,60 @@ def build_message_context(bot_token, message):
     }
 
 
+def _log_activation_if_creator(bot_token, sender_id):
+    """
+    רושם אירוע Activation רק אם השולח הוא היוצר המקורי.
+    """
+    db = get_mongo_db()
+    if db is None:
+        return
+    
+    bot_token_id = bot_token.split(':')[0] if ':' in bot_token else bot_token[:10]
+    
+    flow_doc = db.bot_flows.find_one({"bot_token_id": bot_token_id})
+    if not flow_doc:
+        return
+    
+    creator_id = flow_doc.get("creator_id")
+    if str(sender_id) != str(creator_id):
+        return
+    
+    flow_id = flow_doc["_id"]
+    now = datetime.datetime.utcnow()
+    
+    if flow_doc.get("status") != "activated":
+        db.bot_flows.update_one(
+            {"_id": flow_id, "status": {"$ne": "activated"}},
+            {
+                "$set": {
+                    "status": "activated",
+                    "updated_at": now,
+                    "final_status": "activated",
+                    "completed_at": now,
+                    "stage_times.stage_5_at": now
+                },
+                "$max": {"current_stage": 5}
+            }
+        )
+    
+    unique_key = f"activation_{flow_id}"
+    try:
+        db.funnel_events.update_one(
+            {"_id": unique_key},
+            {"$setOnInsert": {
+                "_id": unique_key,
+                "user_id": str(sender_id),
+                "flow_id": flow_id,
+                "event_type": "bot_activated_by_creator",
+                "bot_token_id": bot_token_id,
+                "timestamp": now
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"⚠️ Error logging activation: {e}")
+
+
 @app.route('/<bot_token>', methods=['POST'])
 def telegram_webhook(bot_token):
     """
@@ -748,6 +1072,8 @@ def telegram_webhook(bot_token):
     if not plugin_filename:
         print(f"⚠️ Unknown bot token received: {bot_token[:10]}...")
         return {"ok": True}
+    
+    _log_activation_if_creator(bot_token, user_id)
 
     # הסר את סיומת .py אם קיימת
     plugin_name = plugin_filename.replace('.py', '')

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+import uuid
 import datetime
 import requests
 from pathlib import Path
@@ -16,6 +17,7 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 from config import Config
+from engine.app import log_funnel_event
 
 
 COMMAND_PREFIX = "/create_bot"
@@ -33,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # MongoDB connection (lazy initialization)
 _mongo_client = None
 _mongo_db = None
+_funnel_indexes_ready = False
 
 
 def _get_mongo_db():
@@ -53,6 +56,7 @@ def _get_mongo_db():
         _mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
         _mongo_client.admin.command('ping')
         _mongo_db = _mongo_client.get_database("bot_factory")
+        _ensure_funnel_indexes(_mongo_db)
         return _mongo_db
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
         print(f"❌ MongoDB connection failed in architect: {e}")
@@ -60,6 +64,41 @@ def _get_mongo_db():
     except Exception as e:
         print(f"❌ MongoDB error in architect: {e}")
         return None
+
+
+def _ensure_funnel_indexes(db):
+    """
+    יוצר אינדקסים נדרשים למשפך ההמרה (Idempotent).
+    """
+    global _funnel_indexes_ready
+    
+    if _funnel_indexes_ready or db is None:
+        return
+    
+    try:
+        # === bot_flows ===
+        db.bot_flows.create_index([("user_id", 1), ("final_status", 1)])
+        db.bot_flows.create_index(
+            [("bot_token_id", 1)],
+            unique=True,
+            partialFilterExpression={"bot_token_id": {"$type": "string"}}
+        )
+        db.bot_flows.create_index([("created_at", -1)])
+        db.bot_flows.create_index([("updated_at", -1)])
+        db.bot_flows.create_index([("current_stage", 1), ("created_at", -1)])
+        
+        # === funnel_events ===
+        db.funnel_events.create_index([("timestamp", -1), ("event_type", 1)])
+        db.funnel_events.create_index([("flow_id", 1), ("event_type", 1)])
+        db.funnel_events.create_index([("bot_token_id", 1), ("event_type", 1)])
+        db.funnel_events.create_index(
+            [("timestamp", 1)],
+            expireAfterSeconds=7776000
+        )
+        
+        _funnel_indexes_ready = True
+    except Exception as e:
+        print(f"⚠️ Failed to ensure funnel indexes in architect: {e}")
 
 # מנגנון נעילה למניעת כפילויות - שומר את הטוקנים שנמצאים כרגע בתהליך יצירה
 _creation_in_progress = {}
@@ -394,15 +433,151 @@ def _cleanup_old_conversations():
         _user_conversations.pop(uid, None)
 
 
+def _generate_flow_id():
+    """יוצר מזהה ייחודי לניסיון יצירה."""
+    return f"f_{uuid.uuid4().hex[:12]}"
+
+
+def _create_flow(user_id):
+    """
+    יוצר flow חדש ושומר ב-DB מיד (לא רק בזיכרון!).
+    """
+    db = _get_mongo_db()
+    if db is None:
+        return None
+    
+    flow_id = _generate_flow_id()
+    now = datetime.datetime.utcnow()
+    
+    try:
+        db.bot_flows.insert_one({
+            "_id": flow_id,
+            "user_id": str(user_id),
+            "creator_id": str(user_id),
+            "status": "started",
+            "current_stage": 1,
+            "bot_token_id": None,
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "final_status": None,
+            "stage_times": {"stage_1_at": now}
+        })
+        return flow_id
+    except Exception as e:
+        print(f"❌ Failed to create flow: {e}")
+        return None
+
+
+def _update_flow(flow_id, status=None, stage=None, bot_token_id=None, final_status=None):
+    """
+    מעדכן flow קיים ב-DB.
+    כולל State Machine Guardrails למניעת רגרסיה!
+    """
+    db = _get_mongo_db()
+    if db is None or not flow_id:
+        return
+    
+    now = datetime.datetime.utcnow()
+    updates = {"updated_at": now}
+    
+    if status:
+        updates["status"] = status
+    
+    if bot_token_id:
+        updates["bot_token_id"] = bot_token_id
+    
+    if final_status:
+        updates["final_status"] = final_status
+        updates["completed_at"] = now
+    
+    # 🛡️ Stage Guardrail: רק קדימה, לא אחורה!
+    if stage:
+        current_flow = db.bot_flows.find_one({"_id": flow_id}, {"current_stage": 1})
+        current_stage = current_flow.get("current_stage", 0) if current_flow else 0
+        
+        if stage > current_stage or final_status in ("failed", "cancelled"):
+            updates["current_stage"] = stage
+            updates[f"stage_times.stage_{stage}_at"] = now
+    
+    db.bot_flows.update_one({"_id": flow_id}, {"$set": updates})
+
+
+def _get_flow(flow_id):
+    """שולף flow מה-DB."""
+    db = _get_mongo_db()
+    if db is None or not flow_id:
+        return None
+    return db.bot_flows.find_one({"_id": flow_id})
+
+
+def _get_user_active_flow(user_id):
+    """
+    שולף flow פעיל של משתמש (לשחזור אחרי restart).
+    """
+    db = _get_mongo_db()
+    if db is None:
+        return None
+    
+    return db.bot_flows.find_one({
+        "user_id": str(user_id),
+        "final_status": None
+    }, sort=[("created_at", -1)])
+
+
+def _get_user_flow_id(user_id):
+    """
+    מחזיר את ה-flow_id של המשתמש.
+    קודם מזיכרון, אם אין - מנסה לשחזר מ-DB.
+    """
+    flow_id = _user_conversations.get(user_id, {}).get("flow_id")
+    if flow_id:
+        return flow_id
+    
+    active_flow = _get_user_active_flow(user_id)
+    if active_flow:
+        _user_conversations[user_id] = {
+            "flow_id": active_flow["_id"],
+            "state": active_flow.get("status"),
+            "token": None,
+            "timestamp": time.time()
+        }
+        return active_flow["_id"]
+    
+    return None
+
+
 def _get_user_state(user_id):
     """מחזיר את מצב השיחה של המשתמש."""
     _cleanup_old_conversations()
-    return _user_conversations.get(user_id, {}).get("state")
+    state = _user_conversations.get(user_id, {}).get("state")
+    if state:
+        return state
+    
+    # אם אין בזיכרון - נסה לשחזר מ-DB (אחרי restart)
+    active_flow = _get_user_active_flow(user_id)
+    if active_flow:
+        _user_conversations[user_id] = {
+            "flow_id": active_flow["_id"],
+            "state": active_flow.get("status"),
+            "token": None,
+            "timestamp": time.time()
+        }
+        return active_flow.get("status")
+    
+    return None
 
 
-def _set_user_state(user_id, state, token=None):
+def _set_user_state(user_id, state, token=None, flow_id=None):
     """מגדיר את מצב השיחה של המשתמש."""
     if state is None:
+        # ניקוי - גם מזיכרון וגם לסגור flow ב-DB אם פתוח
+        old_flow_id = _user_conversations.get(user_id, {}).get("flow_id")
+        if old_flow_id:
+            _update_flow(old_flow_id, final_status="cancelled")
+            log_funnel_event(user_id, "flow_cancelled", flow_id=old_flow_id,
+                             unique_key=f"cancel_{old_flow_id}")
+        
         _user_conversations.pop(user_id, None)
     else:
         data = {"state": state, "timestamp": time.time()}
@@ -410,6 +585,11 @@ def _set_user_state(user_id, state, token=None):
             data["token"] = token
         elif user_id in _user_conversations and "token" in _user_conversations[user_id]:
             data["token"] = _user_conversations[user_id]["token"]
+        
+        if flow_id:
+            data["flow_id"] = flow_id
+        elif user_id in _user_conversations:
+            data["flow_id"] = _user_conversations[user_id].get("flow_id")
         _user_conversations[user_id] = data
 
 
@@ -1050,7 +1230,15 @@ def handle_callback(callback_data, user_id):
             }
         
         # המשתמש לחץ על "צור בוט חדש"
-        _set_user_state(user_id, "waiting_token")
+        flow_id = _create_flow(user_id)
+        if not flow_id:
+            return "אירעה שגיאה, נסה שוב"
+        
+        _set_user_state(user_id, "waiting_token", flow_id=flow_id)
+        _update_flow(flow_id, status="waiting_token", stage=1)
+        
+        log_funnel_event(user_id, "flow_started", flow_id=flow_id,
+                         unique_key=f"start_{flow_id}")
         
         # הוספת מידע על המגבלה
         remaining = MAX_BOTS_PER_USER_PER_DAY - bots_today
@@ -1118,7 +1306,15 @@ def handle_message(text, user_id=None):
                     "parse_mode": "Markdown"
                 }
             
-            _set_user_state(user_id, "waiting_token")
+            flow_id = _create_flow(user_id)
+            if not flow_id:
+                return "אירעה שגיאה, נסה שוב"
+            
+            _set_user_state(user_id, "waiting_token", flow_id=flow_id)
+            _update_flow(flow_id, status="waiting_token", stage=1)
+            
+            log_funnel_event(user_id, "flow_started", flow_id=flow_id,
+                             unique_key=f"start_{flow_id}")
             
             # הוספת מידע על המגבלה
             remaining = MAX_BOTS_PER_USER_PER_DAY - bots_today
@@ -1131,6 +1327,7 @@ def handle_message(text, user_id=None):
                     [{"text": "❌ ביטול", "callback_data": "cancel"}]
                 ])
             }
+        # אם אין user_id, נחזיר הודעה רגילה
         return {
             "text": WAITING_TOKEN_MESSAGE,
             "parse_mode": "Markdown",
@@ -1145,8 +1342,15 @@ def handle_message(text, user_id=None):
         
         # מחכים לטוקן
         if state == "waiting_token":
+            flow_id = _get_user_flow_id(user_id)
+            if not flow_id:
+                _set_user_state(user_id, None)
+                return "אירעה שגיאה. שלח /start כדי להתחיל מחדש."
+            
             # וידוא שהטוקן נראה תקין
             if ':' not in stripped or len(stripped) < 20:
+                log_funnel_event(user_id, "invalid_token_attempt", flow_id=flow_id,
+                                 metadata={"token_preview": stripped[:10]})
                 return {
                     "text": INVALID_TOKEN_MESSAGE,
                     "parse_mode": "Markdown",
@@ -1156,7 +1360,13 @@ def handle_message(text, user_id=None):
                 }
             
             # שמירת הטוקן ומעבר לשלב הבא
-            _set_user_state(user_id, "waiting_description", token=stripped)
+            bot_token_id = stripped.split(':')[0] if ':' in stripped else None
+            _update_flow(flow_id, status="waiting_description", stage=2, bot_token_id=bot_token_id)
+            _set_user_state(user_id, "waiting_description", token=stripped, flow_id=flow_id)
+            
+            log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
+                             bot_token_id=bot_token_id,
+                             unique_key=f"token_{flow_id}")
             return {
                 "text": WAITING_DESCRIPTION_MESSAGE,
                 "parse_mode": "Markdown",
@@ -1168,17 +1378,22 @@ def handle_message(text, user_id=None):
         # מחכים לתיאור
         if state == "waiting_description":
             bot_token = _get_user_token(user_id)
+            flow_id = _get_user_flow_id(user_id)
             if not bot_token:
+                _set_user_state(user_id, None)
+                return "אירעה שגיאה. שלח /start כדי להתחיל מחדש."
+            if not flow_id:
                 _set_user_state(user_id, None)
                 return "אירעה שגיאה. שלח /start כדי להתחיל מחדש."
             
             instruction = stripped
             
-            # ניקוי מצב השיחה
-            _set_user_state(user_id, None)
+            # סימון מעבר ליצירה
+            _set_user_state(user_id, "creating", token=bot_token, flow_id=flow_id)
             
             # יצירת הבוט - כולל מזהה המשתמש לבדיקת מגבלות
-            return _create_bot(bot_token, instruction, user_id)
+            result = _create_bot(bot_token, instruction, user_id, flow_id=flow_id)
+            return result
     
     # תמיכה בפקודה הישירה (לתאימות אחורה)
     if stripped.startswith(COMMAND_PREFIX):
@@ -1192,12 +1407,39 @@ def handle_message(text, user_id=None):
             }
         
         _, bot_token, instruction = parts
-        return _create_bot(bot_token, instruction, user_id)
+        
+        flow_id = _create_flow(user_id) if user_id else None
+        if flow_id:
+            _update_flow(flow_id, status="waiting_token", stage=1)
+            log_funnel_event(user_id, "flow_started", flow_id=flow_id,
+                             unique_key=f"start_{flow_id}")
+        
+        if flow_id and ':' in bot_token and len(bot_token) >= 20:
+            bot_token_id = bot_token.split(':')[0]
+            _update_flow(flow_id, status="waiting_description", stage=2,
+                         bot_token_id=bot_token_id)
+            log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
+                             bot_token_id=bot_token_id,
+                             unique_key=f"token_{flow_id}")
+        
+        return _create_bot(bot_token, instruction, user_id, flow_id=flow_id)
     
     return None
 
 
-def _create_bot(bot_token, instruction, user_id=None):
+def _fail_flow(flow_id, user_id, bot_token_id, error_message):
+    """
+    מסמן flow ככשלון ושומר אירוע.
+    """
+    if not flow_id:
+        return
+    _update_flow(flow_id, status="failed", final_status="failed", bot_token_id=bot_token_id)
+    log_funnel_event(user_id, "creation_failed", flow_id=flow_id,
+                     bot_token_id=bot_token_id,
+                     metadata={"error": error_message})
+
+
+def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
     """
     יוצר בוט חדש.
     
@@ -1205,19 +1447,37 @@ def _create_bot(bot_token, instruction, user_id=None):
         bot_token: טוקן הבוט מ-BotFather
         instruction: תיאור מה הבוט צריך לעשות
         user_id: מזהה המשתמש שיוצר את הבוט (לבדיקת מגבלות)
+        flow_id: מזהה ניסיון היצירה (למשפך ההמרה)
     
     Returns:
         str: הודעת הצלחה או שגיאה
     """
+    bot_token_id = bot_token.split(':')[0] if ':' in bot_token else None
+    
     # וידוא שהטוקן נראה תקין (פורמט בסיסי)
     if ':' not in bot_token or len(bot_token) < 20:
+        if flow_id:
+            log_funnel_event(user_id, "invalid_token_attempt", flow_id=flow_id,
+                             metadata={"token_preview": bot_token[:10]})
         return "טוקן לא תקין. וודא שהעתקת את הטוקן המלא מ-BotFather."
+    
+    # עדכון flow לשלב יצירה + לוג תיאור
+    if flow_id:
+        _update_flow(flow_id, status="creating", stage=3, bot_token_id=bot_token_id)
+        log_funnel_event(user_id, "description_submitted", flow_id=flow_id,
+                         bot_token_id=bot_token_id,
+                         unique_key=f"desc_{flow_id}")
 
     # בדיקת מגבלת יצירת בוטים יומית
     can_create, bots_today = _can_user_create_bot(user_id)
     if not can_create:
         remaining_text = f"יצרת כבר {bots_today} בוטים ב-24 השעות האחרונות."
-        return f"⚠️ הגעת למגבלה היומית!\n\n{remaining_text}\n\nהמגבלה היא {MAX_BOTS_PER_USER_PER_DAY} בוטים ליום.\nנסה שוב מחר 🙏"
+        error_message = (
+            f"⚠️ הגעת למגבלה היומית!\n\n{remaining_text}\n\n"
+            f"המגבלה היא {MAX_BOTS_PER_USER_PER_DAY} בוטים ליום.\nנסה שוב מחר 🙏"
+        )
+        _fail_flow(flow_id, user_id, bot_token_id, error_message)
+        return error_message
 
     # בדיקה אם יש כבר תהליך יצירה פעיל לטוקן זה (מניעת כפילויות)
     if _is_creation_in_progress(bot_token):
@@ -1229,18 +1489,27 @@ def _create_bot(bot_token, instruction, user_id=None):
 
     settings, error = _get_github_settings()
     if error:
+        _fail_flow(flow_id, user_id, bot_token_id, error)
         return error
 
     # בדיקה אם הבוט כבר קיים ב-MongoDB
     if _bot_exists_in_mongodb(bot_token):
-        return "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+        error_message = "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+        _fail_flow(flow_id, user_id, bot_token_id, error_message)
+        return error_message
 
     plugin_path = f"plugins/{plugin_name}.py"
     exists, error = _github_file_exists(settings, plugin_path)
     if error:
+        _fail_flow(flow_id, user_id, bot_token_id, error)
         return error
     if exists:
-        return "בוט עם טוקן זה כבר קיים במערכת (קובץ הפלאגין קיים). אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+        error_message = (
+            "בוט עם טוקן זה כבר קיים במערכת (קובץ הפלאגין קיים). "
+            "אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+        )
+        _fail_flow(flow_id, user_id, bot_token_id, error_message)
+        return error_message
 
     # הודעה שהתהליך התחיל
     print(f"🚀 Starting bot creation for token: {bot_token[:10]}... (user: {user_id})")
@@ -1252,29 +1521,43 @@ def _create_bot(bot_token, instruction, user_id=None):
         # יצירת קוד הפלאגין
         code, error = _generate_plugin_code(plugin_name, instruction)
         if error:
+            _fail_flow(flow_id, user_id, bot_token_id, error)
             return error
 
         # שמירת הקוד בגיטהאב
         created, error = _github_create_file(settings, plugin_path, code)
         if not created:
-            return error or "יצירת הבוט נכשלה."
+            error_message = error or "יצירת הבוט נכשלה."
+            _fail_flow(flow_id, user_id, bot_token_id, error_message)
+            return error_message
 
         print(f"✅ Plugin file created on GitHub: {plugin_path}")
 
         # רישום הבוט ב-MongoDB (מאובטח - לא חשוף בגיטהאב) - כולל מזהה היוצר
         registered, error = _register_bot_in_mongodb(bot_token, f"{plugin_name}.py", user_id)
         if not registered:
-            return f"הקוד נשמר אבל הרישום ב-MongoDB נכשל: {error}"
+            error_message = f"הקוד נשמר אבל הרישום ב-MongoDB נכשל: {error}"
+            _fail_flow(flow_id, user_id, bot_token_id, error_message)
+            return error_message
 
         print(f"✅ Bot registered in MongoDB: {plugin_name}")
 
         # הגדרת webhook לטלגרם
         webhook_set, error = _set_telegram_webhook(bot_token)
         if not webhook_set:
-            return f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
+            error_message = f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
+            _fail_flow(flow_id, user_id, bot_token_id, error_message)
+            return error_message
 
         print(f"✅ Webhook set for bot: {plugin_name}")
 
+        # אחרי הצלחה: עדכון Flow + אירוע
+        if flow_id:
+            _update_flow(flow_id, status="created", stage=4)
+            log_funnel_event(user_id, "bot_created", flow_id=flow_id,
+                             bot_token_id=bot_token_id,
+                             unique_key=f"created_{flow_id}")
+        
         return SUCCESS_MESSAGE
     finally:
         # סימון שתהליך היצירה הסתיים

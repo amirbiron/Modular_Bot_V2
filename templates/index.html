@@ -170,6 +170,92 @@
             color: var(--text-color);
             opacity: 0.7;
         }
+
+        /* ===== Funnel Dashboard ===== */
+        .funnel-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .toggle-group {
+            display: flex;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .toggle-btn {
+            padding: 8px 16px;
+            border: none;
+            background: var(--card-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .toggle-btn.active {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .drop-off-item, .error-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .drop-off-count, .error-count {
+            font-weight: bold;
+            font-size: 1.2em;
+            min-width: 40px;
+        }
+
+        .drop-off-percent {
+            color: var(--danger-color);
+            font-size: 0.9em;
+        }
+
+        /* Summary Grid */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .summary-item {
+            background: rgba(255,255,255,0.05);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .summary-item.success {
+            background: rgba(75, 192, 192, 0.2);
+        }
+
+        .summary-value {
+            display: block;
+            font-size: 2em;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+
+        .summary-item.success .summary-value {
+            color: var(--secondary-color);
+        }
+
+        .summary-label {
+            font-size: 0.85em;
+            opacity: 0.7;
+        }
         
         /* ===== Footer ===== */
         footer {
@@ -192,6 +278,10 @@
             
             .widget-card {
                 padding: 20px;
+            }
+
+            .summary-grid {
+                grid-template-columns: repeat(2, 1fr);
             }
         }
     </style>
@@ -232,11 +322,231 @@
                 <p>הוסף קובץ חדש לתיקיית plugins כדי להתחיל</p>
             </div>
         {% endif %}
+
+        <!-- Funnel Dashboard Section -->
+        <div class="funnel-dashboard">
+            <h2>📊 משפך המרה - יצירת בוטים</h2>
+            
+            <div class="funnel-controls">
+                <select id="funnel-period" onchange="loadFunnel()">
+                    <option value="1">יום אחרון</option>
+                    <option value="7" selected>7 ימים</option>
+                    <option value="30">30 ימים</option>
+                </select>
+                
+                <div class="toggle-group">
+                    <button id="btn-users" class="toggle-btn active" onclick="setGroupBy('users')">👥 משתמשים</button>
+                    <button id="btn-flows" class="toggle-btn" onclick="setGroupBy('flows')">🔄 ניסיונות</button>
+                </div>
+                
+                <button onclick="loadFunnel()">🔄 רענן</button>
+            </div>
+            
+            <div id="funnel-summary"></div>
+            
+            <canvas id="funnelChart" style="max-height: 400px;"></canvas>
+            
+            <div class="funnel-insights">
+                <h3>🚨 נקודות נשירה עיקריות</h3>
+                <div id="drop-offs"></div>
+                
+                <h3>❌ שגיאות נפוצות</h3>
+                <div id="top-errors"></div>
+            </div>
+        </div>
     </div>
     
     <!-- Footer -->
     <footer>
         <p>Powered by Modular Bot V2 | © 2025</p>
     </footer>
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        let currentChart = null;
+        let groupBy = 'flows';
+
+        const stageNames = {
+            'started_chat': 'התחילו שיחה',
+            'requested_bot': 'ביקשו בוט',
+            'submitted_token': 'שלחו טוקן',
+            'submitted_description': 'שלחו תיאור',
+            'bot_created': 'הבוט נוצר בהצלחה',
+            'bot_first_message': 'הריצו את הבוט'
+        };
+
+        function setGroupBy(mode) {
+            groupBy = mode;
+            document.getElementById('btn-users').classList.toggle('active', mode === 'users');
+            document.getElementById('btn-flows').classList.toggle('active', mode === 'flows');
+            loadFunnel();
+        }
+
+        async function loadFunnel() {
+            const days = document.getElementById('funnel-period').value;
+            const adminToken = localStorage.getItem('dashboardAdminToken') || '';
+            
+            const headers = adminToken ? {'X-Admin-Token': adminToken} : {};
+            
+            const response = await fetch(`/api/funnel?days=${days}&window=start`, {headers});
+            
+            if (response.status === 401) {
+                promptForToken();
+                return;
+            }
+            
+            const data = await response.json();
+            
+            renderFunnelChart(data.funnel);
+            renderDropOffs(data.funnel);
+            renderSummary(data.summary);
+            
+            const errorsResponse = await fetch(`/api/funnel/errors?days=${days}`, {headers});
+            const errorsData = await errorsResponse.json();
+            renderErrors(errorsData.top_errors);
+        }
+
+        function renderSummary(summary) {
+            if (!summary) return;
+            const container = document.getElementById('funnel-summary');
+            if (!container) return;
+            
+            container.innerHTML = `
+                <div class="summary-grid">
+                    <div class="summary-item">
+                        <span class="summary-value">${summary.total_flows}</span>
+                        <span class="summary-label">ניסיונות</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-value">${summary.unique_users}</span>
+                        <span class="summary-label">משתמשים</span>
+                    </div>
+                    <div class="summary-item success">
+                        <span class="summary-value">${summary.overall_success_rate}%</span>
+                        <span class="summary-label">הצלחה כוללת</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-value">${summary.avg_attempts_per_user}</span>
+                        <span class="summary-label">ניסיונות/משתמש</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function promptForToken() {
+            const token = prompt('הזן טוקן אדמין לגישה לדשבורד:');
+            if (token) {
+                localStorage.setItem('dashboardAdminToken', token);
+                loadFunnel();
+            }
+        }
+
+        function renderFunnelChart(stages) {
+            const ctx = document.getElementById('funnelChart').getContext('2d');
+            
+            if (currentChart) {
+                currentChart.destroy();
+            }
+            
+            const labels = stages.map(s => s.label || stageNames[s.stage] || s.stage);
+            const data = stages.map(s => s.count);
+            const percentages = stages.map(s => s.overall_conversion);
+            
+            const colors = stages.map((_, i) => {
+                const ratio = i / (stages.length - 1);
+                if (ratio < 0.7) {
+                    return `rgba(54, 162, 235, ${0.9 - ratio * 0.4})`;
+                }
+                return `rgba(75, 192, 192, ${0.7 + ratio * 0.3})`;
+            });
+            
+            currentChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: groupBy === 'users' ? 'משתמשים' : 'ניסיונות',
+                        data: data,
+                        backgroundColor: colors,
+                        borderRadius: 8,
+                        borderSkipped: false,
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => {
+                                    const idx = context.dataIndex;
+                                    return `${context.raw} (${percentages[idx]}% המרה)`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            grid: { color: 'rgba(255,255,255,0.1)' }
+                        },
+                        y: {
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderDropOffs(funnelData) {
+            const container = document.getElementById('drop-offs');
+            
+            const dropOffs = funnelData
+                .filter(s => s.drop_off > 0)
+                .sort((a, b) => b.drop_off - a.drop_off)
+                .slice(0, 3);
+            
+            if (dropOffs.length === 0) {
+                container.innerHTML = '<p>אין נתוני נשירה משמעותיים 🎉</p>';
+                return;
+            }
+            
+            container.innerHTML = dropOffs.map((d) => {
+                const prevStage = funnelData[funnelData.indexOf(d) - 1];
+                const dropRate = prevStage ? Math.round((d.drop_off / prevStage.count) * 100) : 0;
+                return `
+                    <div class="drop-off-item">
+                        <span class="drop-off-count">${d.drop_off}</span>
+                        <span class="drop-off-text">
+                            נשרו לפני "${d.label}"
+                            <span class="drop-off-percent">(${dropRate}% נשירה)</span>
+                        </span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderErrors(errors) {
+            const container = document.getElementById('top-errors');
+            if (!errors || errors.length === 0) {
+                container.innerHTML = '<p>אין שגיאות בתקופה זו 🎉</p>';
+                return;
+            }
+            
+            const icons = ['🔴', '🟠', '🟡', '🔵', '⚪'];
+            container.innerHTML = errors.map((e, i) => `
+                <div class="error-item">
+                    <span class="error-icon">${icons[i] || '•'}</span>
+                    <span class="error-count">${e.count}</span>
+                    <span class="error-text">${e.error || 'שגיאה לא מזוהה'}</span>
+                </div>
+            `).join('');
+        }
+
+        document.addEventListener('DOMContentLoaded', loadFunnel);
+    </script>
 </body>
 </html>
