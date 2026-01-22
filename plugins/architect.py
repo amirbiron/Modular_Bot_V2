@@ -10,8 +10,7 @@ from config import Config
 COMMAND_PREFIX = "/newbot"
 GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_MODEL = "claude-4-5-sonnet"
-ANTHROPIC_VERSION = "2023-06-01"
+ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 CLAUDE_SYSTEM_PROMPT = (
     "אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה ועליך לייצר "
     "קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו. הקוד חייב לכלול פונקציית "
