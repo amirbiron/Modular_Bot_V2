@@ -37,6 +37,9 @@ PLUGINS_CACHE = {}
 _mongo_client = None
 _mongo_db = None
 _funnel_indexes_ready = False
+_funnel_cache = {}
+_errors_cache = {}
+_CACHE_TTL_SECONDS = 60
 
 
 def get_mongo_db():
@@ -103,6 +106,23 @@ def _ensure_funnel_indexes(db):
         _funnel_indexes_ready = True
     except Exception as e:
         print(f"⚠️ Failed to ensure funnel indexes: {e}")
+
+
+def _get_cached_value(cache, key):
+    now = datetime.datetime.utcnow().timestamp()
+    entry = cache.get(key)
+    if entry and (now - entry["timestamp"]) < _CACHE_TTL_SECONDS:
+        return entry["data"]
+    if entry:
+        cache.pop(key, None)
+    return None
+
+
+def _set_cached_value(cache, key, data):
+    cache[key] = {
+        "timestamp": datetime.datetime.utcnow().timestamp(),
+        "data": data
+    }
 
 # Flask defaults to searching for templates relative to this module/package.
 # In this repo templates live at "<project_root>/templates", so we set it explicitly.
@@ -440,6 +460,11 @@ def get_funnel_stats():
     window = request.args.get('window', 'start')
     since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
     
+    cache_key = f"{days}:{window}"
+    cached = _get_cached_value(_funnel_cache, cache_key)
+    if cached:
+        return cached
+    
     db = get_mongo_db()
     if db is None:
         return {"error": "Database not connected"}, 500
@@ -465,12 +490,14 @@ def get_funnel_stats():
     results = list(db.bot_flows.aggregate(pipeline))
     
     if not results:
-        return {
+        response_data = {
             "period_days": days,
             "total_flows": 0,
             "funnel": [],
             "summary": {}
         }
+        _set_cached_value(_funnel_cache, cache_key, response_data)
+        return response_data
     
     data = results[0]
     total = data.get("total_flows", 0)
@@ -515,11 +542,13 @@ def get_funnel_stats():
         ) if data.get("unique_users") else 0
     }
     
-    return {
+    response_data = {
         "period_days": days,
         "funnel": funnel_data,
         "summary": summary
     }
+    _set_cached_value(_funnel_cache, cache_key, response_data)
+    return response_data
 
 
 @app.route('/api/funnel/errors')
@@ -530,6 +559,11 @@ def get_funnel_errors():
     """
     days = request.args.get('days', 7, type=int)
     since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    
+    cache_key = f"{days}"
+    cached = _get_cached_value(_errors_cache, cache_key)
+    if cached:
+        return cached
     
     db = get_mongo_db()
     if db is None:
@@ -550,10 +584,12 @@ def get_funnel_errors():
     
     results = list(db.funnel_events.aggregate(pipeline))
     
-    return {
+    response_data = {
         "period_days": days,
         "top_errors": [{"error": r["_id"], "count": r["count"]} for r in results]
     }
+    _set_cached_value(_errors_cache, cache_key, response_data)
+    return response_data
 
 
 @app.route('/health')
