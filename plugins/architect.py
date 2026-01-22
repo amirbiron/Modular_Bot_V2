@@ -5,7 +5,9 @@ import base64
 import json
 import os
 import re
+import time
 import requests
+from pathlib import Path
 
 from config import Config
 
@@ -16,6 +18,14 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
 BOT_REGISTRY_FILE = "bot_registry.json"
+
+# נתיב לקובץ הרישום המקומי
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_BOT_REGISTRY_PATH = PROJECT_ROOT / BOT_REGISTRY_FILE
+
+# מנגנון נעילה למניעת כפילויות - שומר את הטוקנים שנמצאים כרגע בתהליך יצירה
+_creation_in_progress = {}
+_CREATION_TIMEOUT = 180  # 3 דקות - זמן מקסימלי ליצירת בוט
 CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה.
 
 עליך לייצר קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו.
@@ -47,6 +57,59 @@ SUCCESS_MESSAGE = (
     "🔗 Webhook הוגדר לטלגרם\n"
     "⏳ ה-Deploy האוטומטי של Render התחיל - בעוד 2 דקות הבוט יהיה פעיל"
 )
+
+
+def _is_creation_in_progress(bot_token):
+    """
+    בודק אם יש כרגע תהליך יצירה פעיל לטוקן זה.
+    מנקה תהליכים ישנים שעברו timeout.
+    """
+    current_time = time.time()
+    
+    # ניקוי תהליכים ישנים
+    expired = [t for t, start_time in _creation_in_progress.items() 
+               if current_time - start_time > _CREATION_TIMEOUT]
+    for t in expired:
+        _creation_in_progress.pop(t, None)
+    
+    return bot_token in _creation_in_progress
+
+
+def _start_creation(bot_token):
+    """מסמן שתהליך יצירה התחיל לטוקן זה."""
+    _creation_in_progress[bot_token] = time.time()
+
+
+def _end_creation(bot_token):
+    """מסמן שתהליך יצירה הסתיים לטוקן זה."""
+    _creation_in_progress.pop(bot_token, None)
+
+
+def _update_local_registry(bot_token, plugin_filename):
+    """
+    מעדכן את קובץ הרישום המקומי (לא רק בגיטהאב).
+    זה מאפשר לבוט החדש לעבוד מיד ללא צורך בהמתנה ל-Deploy.
+    """
+    try:
+        # קרא את הרישום הקיים
+        if LOCAL_BOT_REGISTRY_PATH.exists():
+            with open(LOCAL_BOT_REGISTRY_PATH, 'r', encoding='utf-8') as f:
+                registry = json.load(f)
+        else:
+            registry = {}
+        
+        # הוסף את הבוט החדש
+        registry[bot_token] = plugin_filename
+        
+        # שמור את הקובץ
+        with open(LOCAL_BOT_REGISTRY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ Local registry updated: {plugin_filename}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to update local registry: {e}")
+        return False
 
 
 def get_dashboard_widget():
@@ -374,6 +437,11 @@ def handle_message(text):
     if ':' not in bot_token or len(bot_token) < 20:
         return "טוקן לא תקין. וודא שהעתקת את הטוקן המלא מ-BotFather."
 
+    # בדיקה אם יש כבר תהליך יצירה פעיל לטוקן זה (מניעת כפילויות)
+    if _is_creation_in_progress(bot_token):
+        print(f"⏳ Creation already in progress for token: {bot_token[:10]}...")
+        return "⏳ הבוט כבר בתהליך יצירה, אנא המתן..."
+
     # יצירת שם פלאגין מהטוקן
     plugin_name = _generate_plugin_name_from_token(bot_token)
 
@@ -386,26 +454,43 @@ def handle_message(text):
     if error:
         return error
     if exists:
-        return "בוט עם טוקן זה כבר קיים במערכת."
+        return "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
 
-    # יצירת קוד הפלאגין
-    code, error = _generate_plugin_code(plugin_name, instruction)
-    if error:
-        return error
+    # סימון שתהליך היצירה התחיל (למניעת כפילויות מ-webhook)
+    _start_creation(bot_token)
+    print(f"🚀 Starting bot creation for token: {bot_token[:10]}...")
 
-    # שמירת הקוד בגיטהאב
-    created, error = _github_create_file(settings, plugin_path, code)
-    if not created:
-        return error or "יצירת הבוט נכשלה."
+    try:
+        # יצירת קוד הפלאגין
+        code, error = _generate_plugin_code(plugin_name, instruction)
+        if error:
+            return error
 
-    # הוספת הבוט לרישום
-    registered, error = _add_bot_to_registry(settings, bot_token, f"{plugin_name}.py")
-    if not registered:
-        return f"הקוד נשמר אבל הרישום נכשל: {error}"
+        # שמירת הקוד בגיטהאב
+        created, error = _github_create_file(settings, plugin_path, code)
+        if not created:
+            return error or "יצירת הבוט נכשלה."
 
-    # הגדרת webhook לטלגרם
-    webhook_set, error = _set_telegram_webhook(bot_token)
-    if not webhook_set:
-        return f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
+        print(f"✅ Plugin file created on GitHub: {plugin_path}")
 
-    return SUCCESS_MESSAGE
+        # הוספת הבוט לרישום בגיטהאב
+        registered, error = _add_bot_to_registry(settings, bot_token, f"{plugin_name}.py")
+        if not registered:
+            return f"הקוד נשמר אבל הרישום בגיטהאב נכשל: {error}"
+
+        print(f"✅ Bot registered on GitHub: {plugin_name}")
+
+        # עדכון הרישום המקומי (כדי שהבוט יעבוד מיד)
+        _update_local_registry(bot_token, f"{plugin_name}.py")
+
+        # הגדרת webhook לטלגרם
+        webhook_set, error = _set_telegram_webhook(bot_token)
+        if not webhook_set:
+            return f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
+
+        print(f"✅ Webhook set for bot: {plugin_name}")
+
+        return SUCCESS_MESSAGE
+    finally:
+        # סימון שתהליך היצירה הסתיים
+        _end_creation(bot_token)
