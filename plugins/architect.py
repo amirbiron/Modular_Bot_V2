@@ -1,14 +1,19 @@
 # Architect Plugin - creates new plugins via GitHub API
 # תומך ביצירת בוטים חדשים עבור מערכת SaaS
 # כולל ממשק כפתורים ושיחה מונחית
+# משתמש ב-MongoDB לאחסון מאובטח של טוקנים
 
 import base64
 import json
 import os
 import re
 import time
+import datetime
 import requests
 from pathlib import Path
+
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 from config import Config
 
@@ -18,11 +23,40 @@ GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
-BOT_REGISTRY_FILE = "bot_registry.json"
 
-# נתיב לקובץ הרישום המקומי
+# נתיב לתיקיית הפרויקט
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_BOT_REGISTRY_PATH = PROJECT_ROOT / BOT_REGISTRY_FILE
+
+# MongoDB connection (lazy initialization)
+_mongo_client = None
+_mongo_db = None
+
+
+def _get_mongo_db():
+    """
+    מחזיר חיבור ל-MongoDB.
+    משתמש ב-connection pooling ו-lazy initialization.
+    """
+    global _mongo_client, _mongo_db
+    
+    if _mongo_db is not None:
+        return _mongo_db
+    
+    mongo_uri = os.environ.get("MONGO_URI")
+    if not mongo_uri:
+        return None
+    
+    try:
+        _mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        _mongo_client.admin.command('ping')
+        _mongo_db = _mongo_client.get_database("bot_factory")
+        return _mongo_db
+    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+        print(f"❌ MongoDB connection failed in architect: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ MongoDB error in architect: {e}")
+        return None
 
 # מנגנון נעילה למניעת כפילויות - שומר את הטוקנים שנמצאים כרגע בתהליך יצירה
 _creation_in_progress = {}
@@ -281,30 +315,59 @@ def _notify_admin(message, error_type="general"):
         print(f"❌ Failed to notify admin: {e}")
 
 
-def _update_local_registry(bot_token, plugin_filename):
+def _register_bot_in_mongodb(bot_token, plugin_filename):
     """
-    מעדכן את קובץ הרישום המקומי (לא רק בגיטהאב).
-    זה מאפשר לבוט החדש לעבוד מיד ללא צורך בהמתנה ל-Deploy.
+    רושם בוט חדש ב-MongoDB.
+    זה מאפשר לבוט החדש לעבוד מיד.
+    
+    Args:
+        bot_token: טוקן הבוט
+        plugin_filename: שם קובץ הפלאגין
+    
+    Returns:
+        tuple: (success: bool, error: str or None)
     """
+    db = _get_mongo_db()
+    if db is None:
+        return False, "MongoDB לא מוגדר. הוסף MONGO_URI למשתני הסביבה."
+    
     try:
-        # קרא את הרישום הקיים
-        if LOCAL_BOT_REGISTRY_PATH.exists():
-            with open(LOCAL_BOT_REGISTRY_PATH, 'r', encoding='utf-8') as f:
-                registry = json.load(f)
-        else:
-            registry = {}
-        
-        # הוסף את הבוט החדש
-        registry[bot_token] = plugin_filename
-        
-        # שמור את הקובץ
-        with open(LOCAL_BOT_REGISTRY_PATH, 'w', encoding='utf-8') as f:
-            json.dump(registry, f, indent=2, ensure_ascii=False)
-        
-        print(f"✅ Local registry updated: {plugin_filename}")
-        return True
+        # upsert - עדכן אם קיים, צור אם לא
+        db.bot_registry.update_one(
+            {"token": bot_token},
+            {"$set": {
+                "token": bot_token,
+                "plugin_filename": plugin_filename,
+                "created_at": datetime.datetime.utcnow()
+            }},
+            upsert=True
+        )
+        print(f"✅ Bot registered in MongoDB: {plugin_filename}")
+        return True, None
     except Exception as e:
-        print(f"❌ Failed to update local registry: {e}")
+        print(f"❌ Failed to register bot in MongoDB: {e}")
+        return False, f"שגיאה ברישום ב-MongoDB: {e}"
+
+
+def _bot_exists_in_mongodb(bot_token):
+    """
+    בודק אם בוט עם הטוקן הזה כבר קיים ב-MongoDB.
+    
+    Args:
+        bot_token: טוקן הבוט
+    
+    Returns:
+        bool: האם הבוט קיים
+    """
+    db = _get_mongo_db()
+    if db is None:
+        return False
+    
+    try:
+        result = db.bot_registry.find_one({"token": bot_token})
+        return result is not None
+    except Exception as e:
+        print(f"❌ Error checking bot in MongoDB: {e}")
         return False
 
 
@@ -603,40 +666,6 @@ def _github_update_file(settings, path, content, sha, message):
     return False, f"שגיאה בעדכון הקובץ בגיטהאב: {response.status_code} {error_text}"
 
 
-def _add_bot_to_registry(settings, bot_token, plugin_filename):
-    """
-    מוסיף בוט חדש לקובץ הרישום בגיטהאב.
-    """
-    # קרא את הקובץ הקיים
-    content, sha, error = _github_get_file(settings, BOT_REGISTRY_FILE)
-    
-    if error:
-        return False, error
-    
-    # אם הקובץ לא קיים, צור אותו
-    if content is None:
-        registry = {}
-        # צור קובץ חדש
-        registry[bot_token] = plugin_filename
-        new_content = json.dumps(registry, indent=2, ensure_ascii=False)
-        return _github_create_file(settings, BOT_REGISTRY_FILE, new_content)
-    
-    # עדכן את הרישום הקיים
-    try:
-        registry = json.loads(content)
-    except json.JSONDecodeError:
-        registry = {}
-    
-    registry[bot_token] = plugin_filename
-    new_content = json.dumps(registry, indent=2, ensure_ascii=False)
-    
-    return _github_update_file(
-        settings, 
-        BOT_REGISTRY_FILE, 
-        new_content, 
-        sha,
-        f"Add bot {plugin_filename} to registry"
-    )
 
 
 def _set_telegram_webhook(bot_token):
@@ -839,12 +868,16 @@ def _create_bot(bot_token, instruction):
     if error:
         return error
 
+    # בדיקה אם הבוט כבר קיים ב-MongoDB
+    if _bot_exists_in_mongodb(bot_token):
+        return "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+
     plugin_path = f"plugins/{plugin_name}.py"
     exists, error = _github_file_exists(settings, plugin_path)
     if error:
         return error
     if exists:
-        return "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
+        return "בוט עם טוקן זה כבר קיים במערכת (קובץ הפלאגין קיים). אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
 
     # הודעה שהתהליך התחיל
     print(f"🚀 Starting bot creation for token: {bot_token[:10]}...")
@@ -865,15 +898,12 @@ def _create_bot(bot_token, instruction):
 
         print(f"✅ Plugin file created on GitHub: {plugin_path}")
 
-        # הוספת הבוט לרישום בגיטהאב
-        registered, error = _add_bot_to_registry(settings, bot_token, f"{plugin_name}.py")
+        # רישום הבוט ב-MongoDB (מאובטח - לא חשוף בגיטהאב)
+        registered, error = _register_bot_in_mongodb(bot_token, f"{plugin_name}.py")
         if not registered:
-            return f"הקוד נשמר אבל הרישום בגיטהאב נכשל: {error}"
+            return f"הקוד נשמר אבל הרישום ב-MongoDB נכשל: {error}"
 
-        print(f"✅ Bot registered on GitHub: {plugin_name}")
-
-        # עדכון הרישום המקומי (כדי שהבוט יעבוד מיד)
-        _update_local_registry(bot_token, f"{plugin_name}.py")
+        print(f"✅ Bot registered in MongoDB: {plugin_name}")
 
         # הגדרת webhook לטלגרם
         webhook_set, error = _set_telegram_webhook(bot_token)

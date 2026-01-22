@@ -26,6 +26,9 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # Admin notifications
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # Telegram chat ID for alerts
 
+# MongoDB (for secure bot registry - tokens not exposed in GitHub)
+MONGO_URI = os.environ.get("MONGO_URI")  # mongodb+srv://...
+
 
 class Config:
     """הגדרות כלליות לדשבורד הבוט"""
@@ -63,6 +66,9 @@ class Config:
 
     # Admin notifications
     ADMIN_CHAT_ID = ADMIN_CHAT_ID
+
+    # MongoDB
+    MONGO_URI = MONGO_URI
 
 
 # Convenience module-level aliases (for engine/app.py usage)
