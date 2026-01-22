@@ -65,8 +65,8 @@ tenacity>=8.2.0
 
 # === Utilities ===
 emoji>=2.9.0
-googletrans==3.1.0a0
 qrcode>=7.4.0
 validators>=0.22.0
 phonenumbers>=8.13.0
 langdetect>=1.0.9
+deep-translator>=1.11.0  # חלופה יציבה ל-googletrans
