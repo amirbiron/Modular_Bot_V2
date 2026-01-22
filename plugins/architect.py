@@ -1209,8 +1209,8 @@ def _set_telegram_webhook(bot_token, max_retries=3):
     last_error = None
     for attempt in range(max_retries):
         try:
-            # timeout גדל עם כל ניסיון: 15, 20, 25 שניות
-            timeout = 15 + (attempt * 5)
+            # timeout גדל עם כל ניסיון: 30, 45, 60 שניות
+            timeout = 30 + (attempt * 15)
             response = requests.post(
                 api_url,
                 json={"url": webhook_url},
