@@ -41,10 +41,7 @@ class Config:
     
     # רשימת פלאגינים מופעלים
     # הוסף או הסר פלאגינים מכאן
-    ENABLED_PLUGINS = [
-        "hello_world",
-        "github_manager"  # הוספנו את זה!
-    ]
+    ENABLED_PLUGINS = []
     
     # הגדרות נוספות
     # מצב Debug - False בסביבת ייצור
