@@ -9,6 +9,15 @@ from config import Config
 
 COMMAND_PREFIX = "/newbot"
 GITHUB_API_BASE = "https://api.github.com"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODEL = "claude-3-5-sonnet"
+ANTHROPIC_VERSION = "2023-06-01"
+CLAUDE_SYSTEM_PROMPT = (
+    "אתה מפתח פייתון מומחה. עליך לייצר קוד לפלאגין במערכת מודולרית. "
+    "הקוד חייב לכלול פונקציית get_dashboard_widget() שמחזירה מילון עיצובי "
+    "ופונקציית handle_message(text) שמבצעת את הלוגיקה המבוקשת. "
+    "החזר אך ורק את הקוד, ללא הסברים מסביב"
+)
 SUCCESS_MESSAGE = (
     "הקוד נשמר בגיטהאב. ה-Deploy האוטומטי של Render התחיל! "
     "בעוד 2 דקות הבוט יהיה פעיל"
@@ -33,32 +42,87 @@ def _normalize_instruction(instruction):
     return " ".join(instruction.strip().split())
 
 
-def _build_template(name, instruction):
+def _anthropic_headers(api_key):
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+
+def _build_user_prompt(name, instruction):
     normalized = _normalize_instruction(instruction)
-    instruction_literal = repr(normalized)
     return "\n".join(
         [
-            f"\"\"\"",
-            f"Auto-generated plugin: {name}",
-            f"Instruction: {normalized}",
-            f"\"\"\"",
-            "",
-            "def get_dashboard_widget():",
-            "    return {",
-            f"        \"title\": \"{name}\",",
-            "        \"value\": \"Ready\",",
-            "        \"label\": \"Auto-generated plugin\",",
-            "        \"status\": \"info\",",
-            "        \"icon\": \"bi-robot\",",
-            "    }",
-            "",
-            "def handle_message(text):",
-            f"    if text.strip().startswith(\"/{name}\"):",
-            f"        return {instruction_literal}",
-            "    return None",
-            "",
+            f"שם הפלאגין: {name}",
+            f"הנחיית משתמש: {normalized}",
+            f"הפלאגין צריך להגיב לפקודה /{name}.",
         ]
     )
+
+
+def _format_claude_error(response):
+    if response.status_code >= 500:
+        return "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
+
+    error_text = response.text
+    try:
+        error_text = response.json()
+    except Exception:
+        pass
+    return f"שגיאה בשירות Claude: {response.status_code} {error_text}"
+
+
+def _extract_claude_code(payload):
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, list):
+        return None
+
+    text_parts = [
+        part.get("text")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+    ]
+    if not text_parts:
+        return None
+    return "\n".join(text_parts).strip()
+
+
+def _generate_plugin_code(name, instruction):
+    api_key = Config.ANTHROPIC_API_KEY
+    if not api_key:
+        return None, "חסר ANTHROPIC_API_KEY בקונפיגורציה."
+
+    user_prompt = _build_user_prompt(name, instruction)
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 1500,
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    try:
+        response = requests.post(
+            ANTHROPIC_API_URL,
+            headers=_anthropic_headers(api_key),
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException:
+        return None, "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
+
+    if response.status_code != 200:
+        return None, _format_claude_error(response)
+
+    try:
+        response_payload = response.json()
+    except ValueError:
+        return None, "שגיאה בפענוח תגובת Claude."
+
+    code = _extract_claude_code(response_payload)
+    if not code:
+        return None, "Claude לא החזיר קוד."
+
+    return code, None
 
 
 def _get_github_settings():
@@ -149,8 +213,11 @@ def handle_message(text):
     if exists:
         return "פלאגין בשם הזה כבר קיים."
 
-    template = _build_template(name, instruction)
-    created, error = _github_create_file(settings, plugin_path, template)
+    code, error = _generate_plugin_code(name, instruction)
+    if error:
+        return error
+
+    created, error = _github_create_file(settings, plugin_path, code)
     if not created:
         return error or "יצירת הבוט נכשלה."
 

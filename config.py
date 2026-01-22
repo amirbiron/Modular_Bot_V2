@@ -20,6 +20,9 @@ GITHUB_USER = os.environ.get("GITHUB_USER")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH")
 
+# Anthropic (for Architect plugin)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
 
 class Config:
     """הגדרות כלליות לדשבורד הבוט"""
@@ -51,6 +54,9 @@ class Config:
     GITHUB_USER = GITHUB_USER
     GITHUB_REPO = GITHUB_REPO
     GITHUB_BRANCH = GITHUB_BRANCH
+
+    # Anthropic (for Architect plugin)
+    ANTHROPIC_API_KEY = ANTHROPIC_API_KEY
 
 
 # Convenience module-level aliases (for engine/app.py usage)
