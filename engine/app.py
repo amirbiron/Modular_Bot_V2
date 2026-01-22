@@ -551,6 +551,124 @@ def get_funnel_stats():
     return response_data
 
 
+@app.route('/api/funnel/users')
+@admin_required
+def get_funnel_users():
+    """
+    מחזיר נתוני משפך לפי משתמש - איפה כל משתמש נעצר.
+    Query params:
+        - days: מספר ימים אחורה (ברירת מחדל: 7)
+        - stage: סינון לפי שלב ספציפי (אופציונלי)
+        - limit: מספר תוצאות מקסימלי (ברירת מחדל: 50)
+    """
+    days = request.args.get('days', 7, type=int)
+    stage_filter = request.args.get('stage', type=int)
+    limit = request.args.get('limit', 50, type=int)
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    
+    db = get_mongo_db()
+    if db is None:
+        return {"error": "Database not connected"}, 500
+    
+    # שלב 1: שליפת כל ה-flows עם פרטי המשתמש
+    match_query = {"created_at": {"$gte": since}}
+    if stage_filter:
+        match_query["current_stage"] = stage_filter
+    
+    pipeline = [
+        {"$match": match_query},
+        {"$sort": {"updated_at": -1}},
+        {"$limit": limit * 2},  # שולפים יותר כי נקבץ לפי user
+        {"$group": {
+            "_id": "$user_id",
+            "flows": {"$push": {
+                "flow_id": "$_id",
+                "current_stage": "$current_stage",
+                "status": "$status",
+                "final_status": "$final_status",
+                "created_at": "$created_at",
+                "updated_at": "$updated_at"
+            }},
+            "total_attempts": {"$sum": 1},
+            "max_stage_reached": {"$max": "$current_stage"},
+            "last_activity": {"$max": "$updated_at"}
+        }},
+        {"$sort": {"last_activity": -1}},
+        {"$limit": limit}
+    ]
+    
+    results = list(db.bot_flows.aggregate(pipeline))
+    
+    # שלב 2: סיכום לפי שלב נשירה
+    stage_names = {
+        1: "התחילו תהליך",
+        2: "שלחו טוקן תקין",
+        3: "שלחו תיאור",
+        4: "הבוט נוצר",
+        5: "הופעל ע\"י היוצר"
+    }
+    
+    users_by_stage = {i: [] for i in range(1, 6)}
+    all_users = []
+    
+    for user_data in results:
+        user_id = user_data["_id"]
+        max_stage = user_data.get("max_stage_reached", 1)
+        total_attempts = user_data.get("total_attempts", 1)
+        last_activity = user_data.get("last_activity")
+        
+        # מציאת ה-flow האחרון
+        flows = user_data.get("flows", [])
+        latest_flow = flows[0] if flows else {}
+        
+        user_info = {
+            "user_id": user_id,
+            "max_stage_reached": max_stage,
+            "stage_name": stage_names.get(max_stage, f"שלב {max_stage}"),
+            "total_attempts": total_attempts,
+            "last_activity": last_activity.isoformat() if last_activity else None,
+            "current_status": latest_flow.get("status"),
+            "final_status": latest_flow.get("final_status"),
+            "completed": max_stage >= 5
+        }
+        
+        all_users.append(user_info)
+        
+        # קיבוץ לפי שלב נשירה (רק אם לא השלימו)
+        if max_stage < 5:
+            users_by_stage[max_stage].append(user_info)
+    
+    # שלב 3: סיכום נשירה לפי שלב
+    drop_off_summary = []
+    for stage_num in range(1, 5):  # 1-4 (לא 5 כי זה הצלחה)
+        users_at_stage = users_by_stage[stage_num]
+        next_stage_name = stage_names.get(stage_num + 1, "")
+        
+        drop_off_summary.append({
+            "dropped_at_stage": stage_num,
+            "dropped_before": next_stage_name,
+            "stage_name": stage_names.get(stage_num, ""),
+            "user_count": len(users_at_stage),
+            "users": users_at_stage[:10]  # מקסימום 10 לכל שלב
+        })
+    
+    # סיכום כללי
+    completed_users = [u for u in all_users if u["completed"]]
+    
+    return {
+        "period_days": days,
+        "total_users": len(all_users),
+        "completed_users": len(completed_users),
+        "drop_off_rate": round(
+            ((len(all_users) - len(completed_users)) / len(all_users) * 100) 
+            if all_users else 0, 1
+        ),
+        "drop_off_by_stage": drop_off_summary,
+        "recent_users": all_users[:20],  # 20 משתמשים אחרונים
+        "stage_names": stage_names
+    }
+
+
 @app.route('/api/funnel/errors')
 @admin_required
 def get_funnel_errors():
