@@ -284,6 +284,222 @@
                 grid-template-columns: repeat(2, 1fr);
             }
         }
+
+        /* ===== Per-User Drop-off Section ===== */
+        .user-dropoff-section {
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid var(--border-color);
+        }
+
+        .user-dropoff-section h3 {
+            margin-bottom: 5px;
+        }
+
+        .section-subtitle {
+            opacity: 0.7;
+            margin-bottom: 20px;
+            font-size: 0.9em;
+        }
+
+        .user-dropoff-summary {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        .stage-summary-card {
+            background: rgba(255,255,255,0.05);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .stage-summary-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-2px);
+        }
+
+        .stage-summary-card.completed {
+            background: rgba(46, 204, 113, 0.15);
+        }
+
+        .stage-summary-card .stage-count {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: var(--danger-color);
+        }
+
+        .stage-summary-card.completed .stage-count {
+            color: var(--secondary-color);
+        }
+
+        .stage-summary-card .stage-label {
+            font-size: 0.8em;
+            opacity: 0.8;
+            margin-top: 5px;
+        }
+
+        .stage-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .stage-tab {
+            padding: 8px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            background: transparent;
+            color: var(--text-color);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.9em;
+        }
+
+        .stage-tab:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .stage-tab.active {
+            background: var(--primary-color);
+            border-color: var(--primary-color);
+        }
+
+        .stage-tab.completed {
+            border-color: var(--secondary-color);
+        }
+
+        .stage-tab.completed.active {
+            background: var(--secondary-color);
+        }
+
+        .users-by-stage {
+            margin-bottom: 25px;
+        }
+
+        .stage-users-group {
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-right: 4px solid var(--danger-color);
+        }
+
+        .stage-users-group.completed {
+            border-right-color: var(--secondary-color);
+        }
+
+        .stage-users-group h4 {
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stage-users-group h4 .badge {
+            background: var(--danger-color);
+            color: white;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+        }
+
+        .stage-users-group.completed h4 .badge {
+            background: var(--secondary-color);
+        }
+
+        .user-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .user-chip {
+            background: rgba(255,255,255,0.08);
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 0.85em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .user-chip .attempts {
+            opacity: 0.6;
+            font-size: 0.85em;
+        }
+
+        .recent-users-table {
+            margin-top: 20px;
+        }
+
+        .recent-users-table h4 {
+            margin-bottom: 15px;
+        }
+
+        .users-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        .users-table th,
+        .users-table td {
+            padding: 12px;
+            text-align: right;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .users-table th {
+            background: rgba(255,255,255,0.05);
+            font-weight: 600;
+        }
+
+        .users-table tr:hover {
+            background: rgba(255,255,255,0.03);
+        }
+
+        .status-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+        }
+
+        .status-badge.completed {
+            background: rgba(46, 204, 113, 0.2);
+            color: var(--secondary-color);
+        }
+
+        .status-badge.dropped {
+            background: rgba(231, 76, 60, 0.2);
+            color: var(--danger-color);
+        }
+
+        .status-badge.in-progress {
+            background: rgba(241, 196, 15, 0.2);
+            color: var(--warning-color);
+        }
+
+        @media (max-width: 768px) {
+            .user-dropoff-summary {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .users-table {
+                font-size: 0.8em;
+            }
+
+            .users-table th,
+            .users-table td {
+                padding: 8px 6px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -352,6 +568,27 @@
                 
                 <h3>❌ שגיאות נפוצות</h3>
                 <div id="top-errors"></div>
+            </div>
+
+            <!-- Per-User Drop-off Section -->
+            <div class="user-dropoff-section">
+                <h3>👤 נשירה לפי משתמש</h3>
+                <p class="section-subtitle">איפה כל משתמש נעצר בתהליך</p>
+                
+                <div id="user-dropoff-summary" class="user-dropoff-summary"></div>
+                
+                <div class="stage-tabs">
+                    <button class="stage-tab active" data-stage="all" onclick="filterByStage('all')">כולם</button>
+                    <button class="stage-tab" data-stage="1" onclick="filterByStage(1)">שלב 1</button>
+                    <button class="stage-tab" data-stage="2" onclick="filterByStage(2)">שלב 2</button>
+                    <button class="stage-tab" data-stage="3" onclick="filterByStage(3)">שלב 3</button>
+                    <button class="stage-tab" data-stage="4" onclick="filterByStage(4)">שלב 4</button>
+                    <button class="stage-tab completed" data-stage="5" onclick="filterByStage(5)">הושלם ✓</button>
+                </div>
+                
+                <div id="users-by-stage" class="users-by-stage"></div>
+                
+                <div id="recent-users-table" class="recent-users-table"></div>
             </div>
         </div>
     </div>
@@ -545,6 +782,230 @@
                 </div>
             `).join('');
         }
+
+        // ===== Per-User Drop-off Functions =====
+        let userDropoffData = null;
+        let currentStageFilter = 'all';
+
+        async function loadUserDropoffs() {
+            const days = document.getElementById('funnel-period').value;
+            const adminToken = localStorage.getItem('dashboardAdminToken') || '';
+            const headers = adminToken ? {'X-Admin-Token': adminToken} : {};
+            
+            try {
+                const response = await fetch(`/api/funnel/users?days=${days}&limit=100`, {headers});
+                
+                if (response.status === 401) {
+                    return;
+                }
+                
+                userDropoffData = await response.json();
+                renderUserDropoffSummary(userDropoffData);
+                renderUsersByStage(userDropoffData, currentStageFilter);
+                renderRecentUsersTable(userDropoffData);
+            } catch (error) {
+                console.error('Error loading user dropoffs:', error);
+            }
+        }
+
+        function renderUserDropoffSummary(data) {
+            const container = document.getElementById('user-dropoff-summary');
+            if (!container || !data) return;
+            
+            const stageNames = data.stage_names || {};
+            const dropOffByStage = data.drop_off_by_stage || [];
+            
+            // חישוב מספר המשתמשים לכל שלב
+            const stageCounts = {};
+            for (let i = 1; i <= 4; i++) {
+                const stageData = dropOffByStage.find(d => d.dropped_at_stage === i);
+                stageCounts[i] = stageData ? stageData.user_count : 0;
+            }
+            stageCounts[5] = data.completed_users || 0;
+            
+            let html = '';
+            for (let stage = 1; stage <= 5; stage++) {
+                const count = stageCounts[stage];
+                const isCompleted = stage === 5;
+                const label = isCompleted ? 'השלימו' : `נעצרו בשלב ${stage}`;
+                const sublabel = stageNames[stage] || '';
+                
+                html += `
+                    <div class="stage-summary-card ${isCompleted ? 'completed' : ''}" 
+                         onclick="filterByStage(${stage})">
+                        <div class="stage-count">${count}</div>
+                        <div class="stage-label">${label}</div>
+                        <div class="stage-sublabel" style="font-size:0.7em;opacity:0.6;">${sublabel}</div>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+
+        function filterByStage(stage) {
+            currentStageFilter = stage;
+            
+            // עדכון כפתורים פעילים
+            document.querySelectorAll('.stage-tab').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.dataset.stage == stage) {
+                    btn.classList.add('active');
+                }
+            });
+            
+            if (userDropoffData) {
+                renderUsersByStage(userDropoffData, stage);
+            }
+        }
+
+        function renderUsersByStage(data, stageFilter) {
+            const container = document.getElementById('users-by-stage');
+            if (!container || !data) return;
+            
+            const dropOffByStage = data.drop_off_by_stage || [];
+            const recentUsers = data.recent_users || [];
+            const stageNames = data.stage_names || {};
+            
+            let html = '';
+            
+            if (stageFilter === 'all') {
+                // הצג את כל השלבים עם נשירה
+                dropOffByStage.forEach(stageData => {
+                    if (stageData.user_count > 0) {
+                        html += renderStageGroup(stageData, stageNames, false);
+                    }
+                });
+                
+                // הוסף גם את המשתמשים שהשלימו
+                const completedUsers = recentUsers.filter(u => u.completed);
+                if (completedUsers.length > 0) {
+                    html += renderStageGroup({
+                        dropped_at_stage: 5,
+                        stage_name: 'הושלם בהצלחה',
+                        user_count: completedUsers.length,
+                        users: completedUsers.slice(0, 10)
+                    }, stageNames, true);
+                }
+            } else if (stageFilter === 5) {
+                // הצג רק משתמשים שהשלימו
+                const completedUsers = recentUsers.filter(u => u.completed);
+                html += renderStageGroup({
+                    dropped_at_stage: 5,
+                    stage_name: 'הושלם בהצלחה',
+                    user_count: completedUsers.length,
+                    users: completedUsers.slice(0, 15)
+                }, stageNames, true);
+            } else {
+                // הצג שלב ספציפי
+                const stageData = dropOffByStage.find(d => d.dropped_at_stage == stageFilter);
+                if (stageData && stageData.user_count > 0) {
+                    html += renderStageGroup(stageData, stageNames, false);
+                } else {
+                    html = '<p style="opacity:0.6;">אין משתמשים שנעצרו בשלב זה</p>';
+                }
+            }
+            
+            container.innerHTML = html || '<p style="opacity:0.6;">אין נתונים להצגה</p>';
+        }
+
+        function renderStageGroup(stageData, stageNames, isCompleted) {
+            const users = stageData.users || [];
+            const stageName = stageData.stage_name || stageNames[stageData.dropped_at_stage] || '';
+            const nextStageName = stageData.dropped_before || '';
+            
+            let title = isCompleted 
+                ? `השלימו את התהליך` 
+                : `נעצרו לפני "${nextStageName || 'השלב הבא'}"`;
+            
+            let usersHtml = users.map(user => `
+                <div class="user-chip">
+                    <span>${user.user_id}</span>
+                    ${user.total_attempts > 1 ? `<span class="attempts">(${user.total_attempts} ניסיונות)</span>` : ''}
+                </div>
+            `).join('');
+            
+            if (users.length === 0) {
+                usersHtml = '<span style="opacity:0.6;">אין משתמשים</span>';
+            }
+            
+            return `
+                <div class="stage-users-group ${isCompleted ? 'completed' : ''}">
+                    <h4>
+                        ${title}
+                        <span class="badge">${stageData.user_count} משתמשים</span>
+                    </h4>
+                    <div class="user-list">
+                        ${usersHtml}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderRecentUsersTable(data) {
+            const container = document.getElementById('recent-users-table');
+            if (!container || !data) return;
+            
+            const users = data.recent_users || [];
+            if (users.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            
+            const rows = users.slice(0, 15).map(user => {
+                let statusClass = 'dropped';
+                let statusText = `שלב ${user.max_stage_reached}`;
+                
+                if (user.completed) {
+                    statusClass = 'completed';
+                    statusText = 'הושלם';
+                } else if (user.current_status === 'creating' || user.current_status === 'waiting_description') {
+                    statusClass = 'in-progress';
+                    statusText = 'בתהליך';
+                }
+                
+                const lastActivity = user.last_activity 
+                    ? new Date(user.last_activity).toLocaleString('he-IL', {
+                        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                      })
+                    : '-';
+                
+                return `
+                    <tr>
+                        <td>${user.user_id}</td>
+                        <td>${user.stage_name}</td>
+                        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                        <td>${user.total_attempts}</td>
+                        <td>${lastActivity}</td>
+                    </tr>
+                `;
+            }).join('');
+            
+            container.innerHTML = `
+                <h4>משתמשים אחרונים</h4>
+                <table class="users-table">
+                    <thead>
+                        <tr>
+                            <th>מזהה משתמש</th>
+                            <th>שלב אחרון</th>
+                            <th>סטטוס</th>
+                            <th>ניסיונות</th>
+                            <th>פעילות אחרונה</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        // עדכון loadFunnel כדי לטעון גם את נתוני המשתמשים
+        const originalLoadFunnel = loadFunnel;
+        loadFunnel = async function() {
+            await originalLoadFunnel();
+            await loadUserDropoffs();
+        };
 
         document.addEventListener('DOMContentLoaded', loadFunnel);
     </script>

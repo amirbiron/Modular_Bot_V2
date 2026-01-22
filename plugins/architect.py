@@ -1508,7 +1508,7 @@ def handle_message(text, user_id=None):
 
 def _fail_flow(flow_id, user_id, bot_token_id, error_message):
     """
-    מסמן flow ככשלון ושומר אירוע.
+    מסמן flow ככשלון ושומר אירוע + שולח התראה לאדמין.
     """
     if not flow_id:
         return
@@ -1520,6 +1520,57 @@ def _fail_flow(flow_id, user_id, bot_token_id, error_message):
     log_funnel_event(user_id, "creation_failed", flow_id=flow_id,
                      bot_token_id=bot_token_id,
                      metadata={"error": error_message})
+    
+    # שליחת התראה לאדמין על הכשלון
+    _notify_creation_failure(user_id, bot_token_id, error_message, flow_id)
+
+
+def _notify_creation_failure(user_id, bot_token_id, error_message, flow_id=None):
+    """
+    שולח התראה לאדמין כשיצירת בוט נכשלת.
+    
+    Args:
+        user_id: מזהה המשתמש
+        bot_token_id: מזהה הטוקן (החלק הראשון)
+        error_message: הודעת השגיאה
+        flow_id: מזהה ה-flow (אופציונלי)
+    """
+    # בדיקה אם התראות כשלון מופעלות
+    notify_enabled = os.environ.get("NOTIFY_ON_CREATION_FAILURE", "true").lower() == "true"
+    if not notify_enabled:
+        return
+    
+    # קיצור הודעת השגיאה אם ארוכה מדי
+    short_error = error_message[:200] + "..." if len(error_message) > 200 else error_message
+    
+    # סיווג סוג השגיאה
+    error_type = "general"
+    error_emoji = "❌"
+    
+    if "מכסת" in error_message or "quota" in error_message.lower() or "rate" in error_message.lower():
+        error_type = "quota"
+        error_emoji = "🚨"
+    elif "API" in error_message or "Claude" in error_message:
+        error_type = "api_error"
+        error_emoji = "⚠️"
+    elif "GitHub" in error_message or "גיטהאב" in error_message:
+        error_type = "api_error"
+        error_emoji = "🔧"
+    elif "טוקן" in error_message or "token" in error_message.lower():
+        error_emoji = "🔑"
+    elif "מגבלה" in error_message or "limit" in error_message.lower():
+        error_emoji = "⏰"
+    
+    message = f"""{error_emoji} *כשלון יצירת בוט*
+
+👤 משתמש: `{user_id}`
+🤖 טוקן: `{bot_token_id or 'לא ידוע'}`
+📝 Flow: `{flow_id or 'לא ידוע'}`
+
+❌ *שגיאה:*
+{short_error}"""
+    
+    _notify_admin(message, error_type)
 
 
 def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
