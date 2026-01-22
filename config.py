@@ -14,6 +14,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 # Render provides this automatically (e.g. https://<service>.onrender.com)
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
+# GitHub (for Architect plugin)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_USER = os.environ.get("GITHUB_USER")
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH")
+
 
 class Config:
     """הגדרות כלליות לדשבורד הבוט"""
@@ -39,6 +45,12 @@ class Config:
     # Telegram / Render
     TELEGRAM_TOKEN = TELEGRAM_TOKEN
     WEBHOOK_URL = WEBHOOK_URL
+
+    # GitHub (for Architect plugin)
+    GITHUB_TOKEN = GITHUB_TOKEN
+    GITHUB_USER = GITHUB_USER
+    GITHUB_REPO = GITHUB_REPO
+    GITHUB_BRANCH = GITHUB_BRANCH
 
 
 # Convenience module-level aliases (for engine/app.py usage)

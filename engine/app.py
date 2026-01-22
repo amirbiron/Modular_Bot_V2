@@ -23,6 +23,8 @@ from config import Config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
+PLUGINS_DIR = PROJECT_ROOT / "plugins"
+PLUGINS_CACHE = {}
 
 # Flask defaults to searching for templates relative to this module/package.
 # In this repo templates live at "<project_root>/templates", so we set it explicitly.
@@ -62,26 +64,42 @@ set_webhook()
 
 def load_plugins():
     """
-    טוען דינמית את כל הפלאגינים המופעלים
+    טוען דינמית את כל הפלאגינים מתיקיית plugins.
+    שומר את הפלאגינים במטמון גלובלי כדי למנוע טעינה מחדש בכל בקשה.
     
     Returns:
         list: רשימת מודולי הפלאגינים שנטענו
     """
-    loaded_plugins = []
-    
-    for plugin_name in Config.ENABLED_PLUGINS:
+    if not PLUGINS_DIR.exists():
+        return []
+
+    importlib.invalidate_caches()
+
+    plugin_names = {
+        path.stem
+        for path in PLUGINS_DIR.iterdir()
+        if path.is_file() and path.suffix == ".py" and not path.name.startswith("__")
+    }
+
+    # הסרת פלאגינים שנמחקו מהתיקייה
+    for cached_name in list(PLUGINS_CACHE.keys()):
+        if cached_name not in plugin_names:
+            PLUGINS_CACHE.pop(cached_name, None)
+
+    # טעינת פלאגינים חדשים בלבד
+    for plugin_name in sorted(plugin_names):
+        if plugin_name in PLUGINS_CACHE:
+            continue
         try:
-            # ייבוא דינמי של הפלאגין
             plugin_module = importlib.import_module(f"plugins.{plugin_name}")
-            loaded_plugins.append(plugin_module)
+            PLUGINS_CACHE[plugin_name] = plugin_module
             print(f"✅ Plugin loaded: {plugin_name}")
-            
         except ImportError as e:
             print(f"❌ Failed to load plugin '{plugin_name}': {e}")
         except Exception as e:
             print(f"❌ Error loading plugin '{plugin_name}': {e}")
-    
-    return loaded_plugins
+
+    return [PLUGINS_CACHE[name] for name in sorted(PLUGINS_CACHE)]
 
 
 @app.route('/')
@@ -91,18 +109,30 @@ def dashboard():
     טוען את כל הווידג'טים מהפלאגינים
     """
     widgets = []
-    
+
     # טעינת כל הפלאגינים
     plugins = load_plugins()
-    
+
     # איסוף ווידג'טים מכל פלאגין
     for plugin in plugins:
+        widget = None
         if hasattr(plugin, 'get_dashboard_widget'):
             try:
                 widget = plugin.get_dashboard_widget()
-                widgets.append(widget)
             except Exception as e:
                 print(f"❌ Error getting widget from {plugin.__name__}: {e}")
+
+        if not isinstance(widget, dict):
+            plugin_name = plugin.__name__.split(".")[-1]
+            widget = {
+                "title": plugin_name,
+                "value": "Loaded",
+                "label": "No dashboard widget provided",
+                "status": "info",
+                "icon": "bi-plug",
+            }
+
+        widgets.append(widget)
     
     return render_template('index.html', 
                           widgets=widgets, 
