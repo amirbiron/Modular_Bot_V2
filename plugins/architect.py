@@ -137,7 +137,7 @@ def _generate_plugin_code(name, instruction):
     user_prompt = _build_user_prompt(name, instruction)
     data = {
         "model": ANTHROPIC_MODEL,
-        "max_tokens": 4000,
+        "max_tokens": 8000,
         "system": CLAUDE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_prompt}],
     }
@@ -146,12 +146,13 @@ def _generate_plugin_code(name, instruction):
             ANTHROPIC_API_URL,
             headers=_anthropic_headers(api_key),
             json=data,
-            timeout=20,
+            timeout=120,
         )
         response.raise_for_status()
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"Claude API RequestException: {e}")
         try:
-            print(f"Claude API Error: {response.text}")
+            print(f"Claude API Response: {response.text}")
         except Exception:
             pass
         return None, "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
