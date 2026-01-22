@@ -323,9 +323,51 @@ def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None,
         return False
 
 
+def delete_failed_plugin(plugin_name, reason="unknown"):
+    """
+    מוחק קובץ פלאגין שנכשל מהתיקייה ומה-MongoDB registry.
+    
+    Args:
+        plugin_name: שם הפלאגין (ללא סיומת .py)
+        reason: סיבת הכישלון
+    
+    Returns:
+        bool: האם המחיקה הצליחה
+    """
+    plugin_path = PLUGINS_DIR / f"{plugin_name}.py"
+    deleted_file = False
+    deleted_from_db = False
+    
+    # מחיקת קובץ הפלאגין
+    if plugin_path.exists():
+        try:
+            plugin_path.unlink()
+            deleted_file = True
+            print(f"🗑️ Deleted failed plugin file: {plugin_name}.py (reason: {reason})")
+        except Exception as e:
+            print(f"⚠️ Failed to delete plugin file '{plugin_name}': {e}")
+    
+    # מחיקה מה-MongoDB registry
+    db = get_mongo_db()
+    if db is not None:
+        try:
+            result = db.bot_registry.delete_one({"plugin_filename": f"{plugin_name}.py"})
+            if result.deleted_count > 0:
+                deleted_from_db = True
+                print(f"🗑️ Removed failed plugin from MongoDB registry: {plugin_name}")
+        except Exception as e:
+            print(f"⚠️ Failed to remove plugin from MongoDB: {e}")
+    
+    # הסרה מהמטמון
+    PLUGINS_CACHE.pop(plugin_name, None)
+    
+    return deleted_file or deleted_from_db
+
+
 def load_plugin_by_name(plugin_name):
     """
     טוען פלאגין ספציפי לפי שם.
+    אם הטעינה נכשלת, הפלאגין יימחק אוטומטית.
     
     Args:
         plugin_name: שם הפלאגין (ללא סיומת .py)
@@ -349,9 +391,15 @@ def load_plugin_by_name(plugin_name):
         return plugin_module
     except ImportError as e:
         print(f"❌ Failed to load plugin '{plugin_name}': {e}")
+        delete_failed_plugin(plugin_name, reason=f"ImportError: {e}")
+        return None
+    except SyntaxError as e:
+        print(f"❌ Syntax error in plugin '{plugin_name}': {e}")
+        delete_failed_plugin(plugin_name, reason=f"SyntaxError: {e}")
         return None
     except Exception as e:
         print(f"❌ Error loading plugin '{plugin_name}': {e}")
+        delete_failed_plugin(plugin_name, reason=f"Exception: {e}")
         return None
 
 
@@ -359,6 +407,7 @@ def load_plugins():
     """
     טוען דינמית את כל הפלאגינים מתיקיית plugins.
     שומר את הפלאגינים במטמון גלובלי כדי למנוע טעינה מחדש בכל בקשה.
+    פלאגינים שנכשלים בטעינה יימחקו אוטומטית.
     
     Returns:
         list: רשימת מודולי הפלאגינים שנטענו
@@ -389,8 +438,13 @@ def load_plugins():
             print(f"✅ Plugin loaded: {plugin_name}")
         except ImportError as e:
             print(f"❌ Failed to load plugin '{plugin_name}': {e}")
+            delete_failed_plugin(plugin_name, reason=f"ImportError: {e}")
+        except SyntaxError as e:
+            print(f"❌ Syntax error in plugin '{plugin_name}': {e}")
+            delete_failed_plugin(plugin_name, reason=f"SyntaxError: {e}")
         except Exception as e:
             print(f"❌ Error loading plugin '{plugin_name}': {e}")
+            delete_failed_plugin(plugin_name, reason=f"Exception: {e}")
 
     return [PLUGINS_CACHE[name] for name in sorted(PLUGINS_CACHE)]
 
