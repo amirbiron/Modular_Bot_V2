@@ -214,15 +214,118 @@ def health():
     return {"status": "healthy", "bot": Config.BOT_NAME}
 
 
+def send_telegram_message(bot_token, chat_id, reply):
+    """
+    שולח הודעה לטלגרם - תומך בטקסט פשוט או בתשובה מורכבת עם כפתורים.
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט
+        reply: מחרוזת פשוטה או dict עם text ו-reply_markup
+    """
+    if not reply:
+        return
+    
+    # בניית payload ההודעה
+    if isinstance(reply, str):
+        payload = {"chat_id": chat_id, "text": reply}
+    elif isinstance(reply, dict):
+        payload = {"chat_id": chat_id}
+        if "text" in reply:
+            payload["text"] = reply["text"]
+        if "reply_markup" in reply:
+            payload["reply_markup"] = reply["reply_markup"]
+        if "parse_mode" in reply:
+            payload["parse_mode"] = reply["parse_mode"]
+    else:
+        return
+    
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"❌ Failed sending Telegram message: {e}")
+
+
+def answer_callback_query(bot_token, callback_query_id, text=None):
+    """
+    עונה ל-callback query (לחיצה על כפתור).
+    """
+    try:
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery",
+            json=payload,
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"❌ Failed answering callback query: {e}")
+
+
 @app.route('/<bot_token>', methods=['POST'])
 def telegram_webhook(bot_token):
     """
     מקבל עדכונים מטלגרם עבור בוט ספציפי.
     טוען את הפלאגין המשויך לטוקן ומפעיל את handle_message שלו.
     תומך גם בטוקן הראשי (מ-config) וגם בבוטים רשומים ב-bot_registry.
+    תומך גם ב-callback queries (לחיצות על כפתורים).
     """
     update = request.get_json(silent=True) or {}
 
+    # טיפול ב-callback query (לחיצה על כפתור)
+    callback_query = update.get("callback_query")
+    if callback_query:
+        callback_id = callback_query.get("id")
+        callback_data = callback_query.get("data")
+        message = callback_query.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        user_id = (callback_query.get("from") or {}).get("id")
+        
+        if chat_id is None:
+            return {"ok": True}
+        
+        # ענה על ה-callback query כדי להסיר את ה"שעון חול"
+        answer_callback_query(bot_token, callback_id)
+        
+        # טיפול בבוט הראשי
+        if config.TELEGRAM_TOKEN and bot_token == config.TELEGRAM_TOKEN:
+            plugins = load_plugins()
+            for plugin in plugins:
+                if hasattr(plugin, "handle_callback"):
+                    try:
+                        reply = plugin.handle_callback(callback_data, user_id)
+                    except Exception as e:
+                        print(f"❌ Error in handle_callback for {plugin.__name__}: {e}")
+                        continue
+
+                    if reply:
+                        send_telegram_message(bot_token, chat_id, reply)
+                        break
+            return {"ok": True}
+        
+        # טיפול בבוטים רשומים
+        registry = load_bot_registry()
+        if bot_token in registry:
+            plugin_filename = registry[bot_token]
+            plugin_name = plugin_filename.replace('.py', '')
+            plugin = load_plugin_by_name(plugin_name)
+            
+            if plugin and hasattr(plugin, "handle_callback"):
+                try:
+                    reply = plugin.handle_callback(callback_data, user_id)
+                    if reply:
+                        send_telegram_message(bot_token, chat_id, reply)
+                except Exception as e:
+                    print(f"❌ Error in handle_callback for {plugin.__name__}: {e}")
+        
+        return {"ok": True}
+
+    # טיפול בהודעות רגילות
     message = update.get("message") or {}
     text = message.get("text")
 
@@ -231,6 +334,7 @@ def telegram_webhook(bot_token):
         return {"ok": True}
 
     chat_id = (message.get("chat") or {}).get("id")
+    user_id = (message.get("from") or {}).get("id")
     if chat_id is None:
         return {"ok": True}
 
@@ -241,20 +345,17 @@ def telegram_webhook(bot_token):
         for plugin in plugins:
             if hasattr(plugin, "handle_message"):
                 try:
-                    reply = plugin.handle_message(text)
+                    # ננסה לשלוח גם user_id אם הפלאגין תומך
+                    try:
+                        reply = plugin.handle_message(text, user_id)
+                    except TypeError:
+                        reply = plugin.handle_message(text)
                 except Exception as e:
                     print(f"❌ Error in handle_message for {plugin.__name__}: {e}")
                     continue
 
-                if isinstance(reply, str) and reply:
-                    try:
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                            json={"chat_id": chat_id, "text": reply},
-                            timeout=10,
-                        )
-                    except Exception as e:
-                        print(f"❌ Failed sending Telegram message: {e}")
+                if reply:
+                    send_telegram_message(bot_token, chat_id, reply)
                     break
         return {"ok": True}
 
@@ -275,16 +376,13 @@ def telegram_webhook(bot_token):
 
     if hasattr(plugin, "handle_message"):
         try:
-            reply = plugin.handle_message(text)
-            if isinstance(reply, str) and reply:
-                try:
-                    requests.post(
-                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                        json={"chat_id": chat_id, "text": reply},
-                        timeout=10,
-                    )
-                except Exception as e:
-                    print(f"❌ Failed sending Telegram message: {e}")
+            # ננסה לשלוח גם user_id אם הפלאגין תומך
+            try:
+                reply = plugin.handle_message(text, user_id)
+            except TypeError:
+                reply = plugin.handle_message(text)
+            if reply:
+                send_telegram_message(bot_token, chat_id, reply)
         except Exception as e:
             print(f"❌ Error in handle_message for {plugin.__name__}: {e}")
 

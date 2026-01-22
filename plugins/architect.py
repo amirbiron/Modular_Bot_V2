@@ -1,5 +1,6 @@
 # Architect Plugin - creates new plugins via GitHub API
 # תומך ביצירת בוטים חדשים עבור מערכת SaaS
+# כולל ממשק כפתורים ושיחה מונחית
 
 import base64
 import json
@@ -26,6 +27,66 @@ LOCAL_BOT_REGISTRY_PATH = PROJECT_ROOT / BOT_REGISTRY_FILE
 # מנגנון נעילה למניעת כפילויות - שומר את הטוקנים שנמצאים כרגע בתהליך יצירה
 _creation_in_progress = {}
 _CREATION_TIMEOUT = 180  # 3 דקות - זמן מקסימלי ליצירת בוט
+
+# ניהול מצב שיחה למשתמשים (conversation state)
+# מבנה: {user_id: {"state": "waiting_token" | "waiting_description", "token": "...", "timestamp": ...}}
+_user_conversations = {}
+_CONVERSATION_TIMEOUT = 600  # 10 דקות - זמן מקסימלי לשיחה פתוחה
+
+# הודעות למשתמש
+START_MESSAGE = """🤖 *ברוכים הבאים למפעל הבוטים!*
+
+אני יכול ליצור עבורך בוט טלגרם חדש בהתאמה אישית.
+
+*איך זה עובד?*
+1️⃣ לחץ על הכפתור "צור בוט חדש" למטה
+2️⃣ שלח לי את הטוקן שקיבלת מ-@BotFather
+3️⃣ תאר לי מה הבוט צריך לעשות
+4️⃣ אני אייצר את הבוט ותוכל להתחיל להשתמש בו!
+
+*איך מקבלים טוקן?*
+• פתח את @BotFather בטלגרם
+• שלח /newbot ועקוב אחר ההוראות
+• קבל את הטוקן והעתק אותו
+
+*פקודות זמינות:*
+/start - תפריט ראשי
+/create\\_bot - יצירת בוט חדש (עם כפתורים)
+/cancel - ביטול תהליך יצירה"""
+
+WAITING_TOKEN_MESSAGE = """🔑 *שלב 1: שליחת הטוקן*
+
+שלח לי את הטוקן של הבוט שקיבלת מ-@BotFather.
+
+הטוקן נראה בערך ככה:
+`123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`
+
+💡 *טיפ:* פשוט העתק והדבק את הטוקן מההודעה של BotFather.
+
+לביטול התהליך שלח /cancel"""
+
+WAITING_DESCRIPTION_MESSAGE = """📝 *שלב 2: תיאור הבוט*
+
+מצוין! עכשיו תאר לי מה הבוט צריך לעשות.
+
+*דוגמאות לתיאורים:*
+• "בוט שמספר בדיחות בעברית"
+• "בוט לניהול משימות אישיות"
+• "בוט שעונה על שאלות טריוויה"
+• "בוט מזג אוויר לישראל"
+
+ככל שהתיאור יותר מפורט, הבוט יהיה יותר מדויק! 🎯
+
+לביטול התהליך שלח /cancel"""
+
+CANCEL_MESSAGE = "❌ התהליך בוטל. שלח /start כדי להתחיל מחדש."
+
+INVALID_TOKEN_MESSAGE = """⚠️ הטוקן לא נראה תקין.
+
+טוקן תקין צריך להיות בפורמט:
+`123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`
+
+נסה שוב או שלח /cancel לביטול."""
 CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה.
 
 עליך לייצר קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו.
@@ -104,6 +165,54 @@ def _start_creation(bot_token):
 def _end_creation(bot_token):
     """מסמן שתהליך יצירה הסתיים לטוקן זה."""
     _creation_in_progress.pop(bot_token, None)
+
+
+def _cleanup_old_conversations():
+    """מנקה שיחות ישנות שעברו timeout."""
+    current_time = time.time()
+    expired = [uid for uid, data in _user_conversations.items()
+               if current_time - data.get("timestamp", 0) > _CONVERSATION_TIMEOUT]
+    for uid in expired:
+        _user_conversations.pop(uid, None)
+
+
+def _get_user_state(user_id):
+    """מחזיר את מצב השיחה של המשתמש."""
+    _cleanup_old_conversations()
+    return _user_conversations.get(user_id, {}).get("state")
+
+
+def _set_user_state(user_id, state, token=None):
+    """מגדיר את מצב השיחה של המשתמש."""
+    if state is None:
+        _user_conversations.pop(user_id, None)
+    else:
+        data = {"state": state, "timestamp": time.time()}
+        if token:
+            data["token"] = token
+        elif user_id in _user_conversations and "token" in _user_conversations[user_id]:
+            data["token"] = _user_conversations[user_id]["token"]
+        _user_conversations[user_id] = data
+
+
+def _get_user_token(user_id):
+    """מחזיר את הטוקן ששמרנו עבור המשתמש."""
+    return _user_conversations.get(user_id, {}).get("token")
+
+
+def _create_inline_keyboard(buttons):
+    """
+    יוצר inline keyboard לטלגרם.
+    
+    Args:
+        buttons: רשימת רשימות של כפתורים. כל כפתור הוא dict עם text ו-callback_data.
+    
+    Returns:
+        dict: reply_markup מוכן לשליחה לטלגרם
+    """
+    return {
+        "inline_keyboard": buttons
+    }
 
 
 def _update_local_registry(bot_token, plugin_filename):
@@ -440,20 +549,148 @@ def _generate_plugin_name_from_token(bot_token):
     return f"bot_{bot_id}"
 
 
-def handle_message(text):
+def handle_callback(callback_data, user_id):
+    """
+    מטפל בלחיצות על כפתורים (callback queries).
+    
+    Args:
+        callback_data: המידע שנשלח עם הכפתור
+        user_id: מזהה המשתמש
+    
+    Returns:
+        dict או str: התגובה לשליחה למשתמש
+    """
+    if callback_data == "create_bot":
+        # המשתמש לחץ על "צור בוט חדש"
+        _set_user_state(user_id, "waiting_token")
+        return {
+            "text": WAITING_TOKEN_MESSAGE,
+            "parse_mode": "Markdown"
+        }
+    
+    elif callback_data == "cancel":
+        _set_user_state(user_id, None)
+        return CANCEL_MESSAGE
+    
+    return None
+
+
+def handle_message(text, user_id=None):
+    """
+    מטפל בהודעות נכנסות.
+    תומך בשיחה מונחית עם כפתורים וגם בפקודה הישירה.
+    
+    Args:
+        text: טקסט ההודעה
+        user_id: מזהה המשתמש (אופציונלי, נדרש לשיחה מונחית)
+    
+    Returns:
+        dict או str: התגובה לשליחה למשתמש
+    """
     if not text:
         return None
 
     stripped = text.strip()
-    if not stripped.startswith(COMMAND_PREFIX):
-        return None
-
-    parts = stripped.split(maxsplit=2)
-    if len(parts) < 3:
-        return "שימוש: /create_bot <token> <instruction>\nדוגמה: /create_bot 123456:ABC-DEF בוט שמספר בדיחות"
-
-    _, bot_token, instruction = parts
     
+    # פקודת /start - תפריט ראשי עם כפתורים
+    if stripped == "/start":
+        if user_id:
+            _set_user_state(user_id, None)  # אתחול מצב
+        return {
+            "text": START_MESSAGE,
+            "parse_mode": "Markdown",
+            "reply_markup": _create_inline_keyboard([
+                [{"text": "🚀 צור בוט חדש", "callback_data": "create_bot"}]
+            ])
+        }
+    
+    # פקודת /cancel - ביטול תהליך
+    if stripped == "/cancel":
+        if user_id:
+            _set_user_state(user_id, None)
+        return CANCEL_MESSAGE
+    
+    # פקודת /create_bot - התחלת תהליך יצירה (גם דרך פקודה)
+    if stripped == "/create_bot":
+        if user_id:
+            _set_user_state(user_id, "waiting_token")
+        return {
+            "text": WAITING_TOKEN_MESSAGE,
+            "parse_mode": "Markdown",
+            "reply_markup": _create_inline_keyboard([
+                [{"text": "❌ ביטול", "callback_data": "cancel"}]
+            ])
+        }
+    
+    # בדיקת מצב שיחה אם יש user_id
+    if user_id:
+        state = _get_user_state(user_id)
+        
+        # מחכים לטוקן
+        if state == "waiting_token":
+            # וידוא שהטוקן נראה תקין
+            if ':' not in stripped or len(stripped) < 20:
+                return {
+                    "text": INVALID_TOKEN_MESSAGE,
+                    "parse_mode": "Markdown",
+                    "reply_markup": _create_inline_keyboard([
+                        [{"text": "❌ ביטול", "callback_data": "cancel"}]
+                    ])
+                }
+            
+            # שמירת הטוקן ומעבר לשלב הבא
+            _set_user_state(user_id, "waiting_description", token=stripped)
+            return {
+                "text": WAITING_DESCRIPTION_MESSAGE,
+                "parse_mode": "Markdown",
+                "reply_markup": _create_inline_keyboard([
+                    [{"text": "❌ ביטול", "callback_data": "cancel"}]
+                ])
+            }
+        
+        # מחכים לתיאור
+        if state == "waiting_description":
+            bot_token = _get_user_token(user_id)
+            if not bot_token:
+                _set_user_state(user_id, None)
+                return "אירעה שגיאה. שלח /start כדי להתחיל מחדש."
+            
+            instruction = stripped
+            
+            # ניקוי מצב השיחה
+            _set_user_state(user_id, None)
+            
+            # יצירת הבוט
+            return _create_bot(bot_token, instruction)
+    
+    # תמיכה בפקודה הישירה (לתאימות אחורה)
+    if stripped.startswith(COMMAND_PREFIX):
+        parts = stripped.split(maxsplit=2)
+        if len(parts) < 3:
+            return {
+                "text": "שימוש: /create_bot <token> <instruction>\n\n💡 או פשוט שלח /start ותן לי להדריך אותך בתהליך!",
+                "reply_markup": _create_inline_keyboard([
+                    [{"text": "🚀 צור בוט חדש", "callback_data": "create_bot"}]
+                ])
+            }
+        
+        _, bot_token, instruction = parts
+        return _create_bot(bot_token, instruction)
+    
+    return None
+
+
+def _create_bot(bot_token, instruction):
+    """
+    יוצר בוט חדש.
+    
+    Args:
+        bot_token: טוקן הבוט מ-BotFather
+        instruction: תיאור מה הבוט צריך לעשות
+    
+    Returns:
+        str: הודעת הצלחה או שגיאה
+    """
     # וידוא שהטוקן נראה תקין (פורמט בסיסי)
     if ':' not in bot_token or len(bot_token) < 20:
         return "טוקן לא תקין. וודא שהעתקת את הטוקן המלא מ-BotFather."
@@ -477,9 +714,11 @@ def handle_message(text):
     if exists:
         return "בוט עם טוקן זה כבר קיים במערכת. אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
 
+    # הודעה שהתהליך התחיל
+    print(f"🚀 Starting bot creation for token: {bot_token[:10]}...")
+    
     # סימון שתהליך היצירה התחיל (למניעת כפילויות מ-webhook)
     _start_creation(bot_token)
-    print(f"🚀 Starting bot creation for token: {bot_token[:10]}...")
 
     try:
         # יצירת קוד הפלאגין
