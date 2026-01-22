@@ -2,17 +2,19 @@
 Engine - ליבת המערכת
 מנוע Flask עם טעינה דינמית של פלאגינים
 תומך ב-SaaS עם מספר בוטים של משתמשים שונים
+משתמש ב-MongoDB לאחסון מאובטח של טוקנים
 """
 
 from flask import Flask, render_template, request
 import importlib
 import sys
 import os
-import json
 import traceback
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 # טעינת משתני סביבה מקובץ .env (אם קיים)
 load_dotenv()
@@ -27,8 +29,41 @@ from config import Config
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 PLUGINS_DIR = PROJECT_ROOT / "plugins"
-BOT_REGISTRY_PATH = PROJECT_ROOT / "bot_registry.json"
 PLUGINS_CACHE = {}
+
+# MongoDB connection
+_mongo_client = None
+_mongo_db = None
+
+
+def get_mongo_db():
+    """
+    מחזיר חיבור ל-MongoDB.
+    משתמש ב-connection pooling ו-lazy initialization.
+    """
+    global _mongo_client, _mongo_db
+    
+    if _mongo_db is not None:
+        return _mongo_db
+    
+    mongo_uri = os.environ.get("MONGO_URI")
+    if not mongo_uri:
+        print("⚠️ MONGO_URI not configured - bot registry disabled")
+        return None
+    
+    try:
+        _mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        # בדיקת חיבור
+        _mongo_client.admin.command('ping')
+        _mongo_db = _mongo_client.get_database("bot_factory")
+        print("✅ MongoDB connected successfully")
+        return _mongo_db
+    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+        print(f"❌ MongoDB connection failed: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ MongoDB error: {e}")
+        return None
 
 # Flask defaults to searching for templates relative to this module/package.
 # In this repo templates live at "<project_root>/templates", so we set it explicitly.
@@ -66,38 +101,116 @@ def set_webhook():
 set_webhook()
 
 
-def load_bot_registry():
+def get_plugin_for_token(bot_token):
     """
-    טוען את קובץ הרישום של הבוטים.
-    
-    Returns:
-        dict: מיפוי בין token לבין plugin_filename
-    """
-    if not BOT_REGISTRY_PATH.exists():
-        return {}
-    
-    try:
-        with open(BOT_REGISTRY_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"❌ Error loading bot registry: {e}")
-        return {}
-
-
-def save_bot_registry(registry):
-    """
-    שומר את קובץ הרישום של הבוטים.
+    מחזיר את שם הפלאגין עבור טוקן מסוים מ-MongoDB.
     
     Args:
-        registry: dict - מיפוי בין token לבין plugin_filename
+        bot_token: טוקן הבוט
+    
+    Returns:
+        str: שם הפלאגין או None אם לא נמצא
     """
+    db = get_mongo_db()
+    if db is None:
+        return None
+    
     try:
-        with open(BOT_REGISTRY_PATH, 'w', encoding='utf-8') as f:
-            json.dump(registry, f, indent=2, ensure_ascii=False)
-        return True
-    except IOError as e:
-        print(f"❌ Error saving bot registry: {e}")
+        result = db.bot_registry.find_one({"token": bot_token})
+        if result:
+            return result.get("plugin_filename")
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching bot from MongoDB: {e}")
+        return None
+
+
+def register_bot_in_db(bot_token, plugin_filename):
+    """
+    רושם בוט חדש ב-MongoDB.
+    
+    Args:
+        bot_token: טוקן הבוט
+        plugin_filename: שם קובץ הפלאגין
+    
+    Returns:
+        bool: האם הרישום הצליח
+    """
+    db = get_mongo_db()
+    if db is None:
+        print("❌ Cannot register bot - MongoDB not connected")
         return False
+    
+    try:
+        # upsert - עדכן אם קיים, צור אם לא
+        db.bot_registry.update_one(
+            {"token": bot_token},
+            {"$set": {
+                "token": bot_token,
+                "plugin_filename": plugin_filename,
+                "created_at": __import__('datetime').datetime.utcnow()
+            }},
+            upsert=True
+        )
+        print(f"✅ Bot registered in MongoDB: {plugin_filename}")
+        return True
+    except Exception as e:
+        print(f"❌ Error registering bot in MongoDB: {e}")
+        return False
+
+
+def bot_exists_in_db(bot_token):
+    """
+    בודק אם בוט עם הטוקן הזה כבר קיים ב-MongoDB.
+    
+    Args:
+        bot_token: טוקן הבוט
+    
+    Returns:
+        bool: האם הבוט קיים
+    """
+    db = get_mongo_db()
+    if db is None:
+        return False
+    
+    try:
+        result = db.bot_registry.find_one({"token": bot_token})
+        return result is not None
+    except Exception as e:
+        print(f"❌ Error checking bot existence in MongoDB: {e}")
+        return False
+
+
+def log_user_action(user_id, action_type, bot_token=None, details=None):
+    """
+    רושם פעולת משתמש ב-MongoDB לצורכי אנליטיקס.
+    
+    Args:
+        user_id: מזהה המשתמש בטלגרם
+        action_type: סוג הפעולה (message, callback, command)
+        bot_token: טוקן הבוט (אופציונלי, מוסתר חלקית)
+        details: פרטים נוספים (אופציונלי)
+    """
+    db = get_mongo_db()
+    if db is None:
+        return
+    
+    try:
+        # הסתרת חלק מהטוקן לאבטחה
+        safe_bot_id = None
+        if bot_token and ':' in bot_token:
+            safe_bot_id = bot_token.split(':')[0]
+        
+        db.user_actions.insert_one({
+            "user_id": user_id,
+            "action_type": action_type,
+            "bot_id": safe_bot_id,
+            "details": details,
+            "timestamp": __import__('datetime').datetime.utcnow()
+        })
+    except Exception as e:
+        # לא נכשיל את הבקשה בגלל לוג
+        print(f"⚠️ Failed to log user action: {e}")
 
 
 def load_plugin_by_name(plugin_name):
@@ -290,6 +403,9 @@ def telegram_webhook(bot_token):
         if chat_id is None:
             return {"ok": True}
         
+        # רישום פעולת משתמש לאנליטיקס
+        log_user_action(user_id, "callback", bot_token, {"data": callback_data})
+        
         # ענה על ה-callback query כדי להסיר את ה"שעון חול"
         answer_callback_query(bot_token, callback_id)
         
@@ -312,10 +428,9 @@ def telegram_webhook(bot_token):
                         break
             return {"ok": True}
         
-        # טיפול בבוטים רשומים
-        registry = load_bot_registry()
-        if bot_token in registry:
-            plugin_filename = registry[bot_token]
+        # טיפול בבוטים רשומים (מ-MongoDB)
+        plugin_filename = get_plugin_for_token(bot_token)
+        if plugin_filename:
             plugin_name = plugin_filename.replace('.py', '')
             plugin = load_plugin_by_name(plugin_name)
             
@@ -345,6 +460,10 @@ def telegram_webhook(bot_token):
     if chat_id is None:
         return {"ok": True}
 
+    # רישום פעולת משתמש לאנליטיקס
+    action_type = "command" if text.startswith("/") else "message"
+    log_user_action(user_id, action_type, bot_token, {"text_preview": text[:50] if text else None})
+
     # בדיקה אם זה הטוקן הראשי (הבוט המקורי)
     if config.TELEGRAM_TOKEN and bot_token == config.TELEGRAM_TOKEN:
         # התנהגות מקורית - טען את כל הפלאגינים
@@ -370,13 +489,12 @@ def telegram_webhook(bot_token):
                     break
         return {"ok": True}
 
-    # בדיקה אם הטוקן רשום ב-bot_registry
-    registry = load_bot_registry()
-    if bot_token not in registry:
+    # בדיקה אם הטוקן רשום ב-MongoDB
+    plugin_filename = get_plugin_for_token(bot_token)
+    if not plugin_filename:
         print(f"⚠️ Unknown bot token received: {bot_token[:10]}...")
         return {"ok": True}
 
-    plugin_filename = registry[bot_token]
     # הסר את סיומת .py אם קיימת
     plugin_name = plugin_filename.replace('.py', '')
     
