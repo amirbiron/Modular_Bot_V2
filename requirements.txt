@@ -53,6 +53,16 @@ yfinance>=0.2.30
 # === Charts & Visualization ===
 matplotlib>=3.8.0
 
+# === Documents & Files ===
+openpyxl>=3.1.0
+pypdf>=3.17.0
+
+# === RSS & Feeds ===
+feedparser>=6.0.0
+
+# === Retry & Resilience ===
+tenacity>=8.2.0
+
 # === Utilities ===
 emoji>=2.9.0
 googletrans==3.1.0a0

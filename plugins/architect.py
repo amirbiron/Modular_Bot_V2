@@ -127,12 +127,38 @@ CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מו
 - ההודעה צריכה להציע למשתמש ללחוץ על /start כדי לראות את רשימת הפקודות הזמינות
 - לדוגמה: "לא הבנתי את הבקשה 🤔\nשלח /start כדי לראות את כל הפקודות הזמינות"
 
+=== Available Libraries ===
+You have the following libraries pre-installed. You MAY import them without asking:
+- Data & Math: numpy, pandas, scipy
+- HTTP & Web: requests, beautifulsoup4, httpx, aiohttp, feedparser
+- Files & Documents: openpyxl, pypdf, pyyaml
+- Images & Charts: Pillow, matplotlib, qrcode
+- Database: pymongo, redis
+- Date & Time: python-dateutil, pytz
+- Text & Validation: regex, pydantic, validators, phonenumbers, langdetect, emoji
+- Utilities: cachetools, schedule, tenacity
+- Finance: yfinance, pycoingecko
+
+=== STRICT RULE - Library Restrictions ===
+Do NOT try to import any other external library that is not listed above!
+Forbidden libraries include (but not limited to): cv2, opencv, sklearn, scikit-learn, selenium, playwright, fastapi, django, tensorflow, pytorch, keras, transformers.
+
+If the user asks for a feature requiring a missing library, you MUST implement a workaround using:
+1. Standard Python libraries (json, re, math, random, datetime, collections, itertools, functools, etc.)
+2. The available libraries listed above
+
+Examples of workarounds:
+- Instead of sklearn for simple regression → use numpy for the math calculations
+- Instead of cv2 for basic image operations → use Pillow
+- Instead of selenium for web scraping → use requests + beautifulsoup4
+
 === כללים חשובים נוספים ===
 - החזר אך ורק את הקוד, ללא הסברים, ללא markdown, ללא ```python
 - הקוד חייב להיות תקין ומוכן להרצה
 - אם צריך לגשת ל-API חיצוני, השתמש ב-requests עם timeout
 - תפוס שגיאות בצורה נכונה והחזר הודעת שגיאה ידידותית
-- הבוט הזה יהיה עצמאי ולכן צריך להגיב לכל הודעה"""
+- הבוט הזה יהיה עצמאי ולכן צריך להגיב לכל הודעה
+- עטוף את כל הלוגיקה ב-try/except כדי למנוע קריסות"""
 SUCCESS_MESSAGE = (
     "✅ הבוט נוצר בהצלחה!\n"
     "📦 הקוד נשמר בגיטהאב\n"

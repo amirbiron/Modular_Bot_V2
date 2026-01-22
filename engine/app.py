@@ -9,6 +9,7 @@ import importlib
 import sys
 import os
 import json
+import traceback
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
@@ -301,6 +302,9 @@ def telegram_webhook(bot_token):
                         reply = plugin.handle_callback(callback_data, user_id)
                     except Exception as e:
                         print(f"❌ Error in handle_callback for {plugin.__name__}: {e}")
+                        traceback.print_exc()
+                        error_message = "⚠️ אירעה שגיאה פנימית בבוט זה.\nנסה שוב מאוחר יותר או שלח /start"
+                        send_telegram_message(bot_token, chat_id, error_message)
                         continue
 
                     if reply:
@@ -322,6 +326,9 @@ def telegram_webhook(bot_token):
                         send_telegram_message(bot_token, chat_id, reply)
                 except Exception as e:
                     print(f"❌ Error in handle_callback for {plugin.__name__}: {e}")
+                    traceback.print_exc()
+                    error_message = "⚠️ אירעה שגיאה פנימית בבוט זה.\nנסה שוב מאוחר יותר או שלח /start"
+                    send_telegram_message(bot_token, chat_id, error_message)
         
         return {"ok": True}
 
@@ -352,6 +359,10 @@ def telegram_webhook(bot_token):
                         reply = plugin.handle_message(text)
                 except Exception as e:
                     print(f"❌ Error in handle_message for {plugin.__name__}: {e}")
+                    traceback.print_exc()
+                    # שליחת הודעת שגיאה ידידותית למשתמש
+                    error_message = "⚠️ אירעה שגיאה פנימית בבוט זה.\nנסה שוב מאוחר יותר או שלח /start"
+                    send_telegram_message(bot_token, chat_id, error_message)
                     continue
 
                 if reply:
@@ -384,7 +395,12 @@ def telegram_webhook(bot_token):
             if reply:
                 send_telegram_message(bot_token, chat_id, reply)
         except Exception as e:
+            # תפיסת כל שגיאה מהפלאגין - רישום לוג והחזרת הודעה ידידותית למשתמש
             print(f"❌ Error in handle_message for {plugin.__name__}: {e}")
+            traceback.print_exc()
+            # שליחת הודעת שגיאה ידידותית למשתמש
+            error_message = "⚠️ אירעה שגיאה פנימית בבוט זה.\nנסה שוב מאוחר יותר או שלח /start"
+            send_telegram_message(bot_token, chat_id, error_message)
 
     return {"ok": True}
 
