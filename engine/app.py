@@ -381,6 +381,260 @@ def answer_callback_query(bot_token, callback_query_id, text=None):
         print(f"❌ Failed answering callback query: {e}")
 
 
+# === Group Management Helper Functions ===
+
+def delete_message(bot_token, chat_id, message_id):
+    """
+    מוחק הודעה מצ'אט.
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט
+        message_id: מזהה ההודעה למחיקה
+    
+    Returns:
+        bool: האם המחיקה הצליחה
+    """
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=10,
+        )
+        return response.ok and response.json().get("ok", False)
+    except Exception as e:
+        print(f"❌ Failed deleting message: {e}")
+        return False
+
+
+def ban_user(bot_token, chat_id, user_id, until_date=None):
+    """
+    מרחיק משתמש מקבוצה (באן).
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש להרחקה
+        until_date: תאריך סיום הבאן (Unix timestamp), None = לצמיתות
+    
+    Returns:
+        bool: האם הפעולה הצליחה
+    """
+    try:
+        payload = {"chat_id": chat_id, "user_id": user_id}
+        if until_date:
+            payload["until_date"] = until_date
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/banChatMember",
+            json=payload,
+            timeout=10,
+        )
+        return response.ok and response.json().get("ok", False)
+    except Exception as e:
+        print(f"❌ Failed banning user: {e}")
+        return False
+
+
+def kick_user(bot_token, chat_id, user_id):
+    """
+    מסיר משתמש מקבוצה (ללא באן - יכול לחזור).
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש להסרה
+    
+    Returns:
+        bool: האם הפעולה הצליחה
+    """
+    try:
+        # קודם באן
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/banChatMember",
+            json={"chat_id": chat_id, "user_id": user_id},
+            timeout=10,
+        )
+        if not (response.ok and response.json().get("ok", False)):
+            return False
+        # אז unban כדי שיוכל לחזור
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/unbanChatMember",
+            json={"chat_id": chat_id, "user_id": user_id, "only_if_banned": True},
+            timeout=10,
+        )
+        return response.ok and response.json().get("ok", False)
+    except Exception as e:
+        print(f"❌ Failed kicking user: {e}")
+        return False
+
+
+def mute_user(bot_token, chat_id, user_id, until_date=None):
+    """
+    משתיק משתמש בקבוצה (לא יכול לשלוח הודעות).
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש להשתקה
+        until_date: תאריך סיום ההשתקה (Unix timestamp), None = לצמיתות
+    
+    Returns:
+        bool: האם הפעולה הצליחה
+    """
+    try:
+        payload = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "permissions": {
+                "can_send_messages": False,
+                "can_send_media_messages": False,
+                "can_send_other_messages": False,
+                "can_add_web_page_previews": False,
+            }
+        }
+        if until_date:
+            payload["until_date"] = until_date
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/restrictChatMember",
+            json=payload,
+            timeout=10,
+        )
+        return response.ok and response.json().get("ok", False)
+    except Exception as e:
+        print(f"❌ Failed muting user: {e}")
+        return False
+
+
+def unmute_user(bot_token, chat_id, user_id):
+    """
+    מבטל השתקה של משתמש בקבוצה.
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש
+    
+    Returns:
+        bool: האם הפעולה הצליחה
+    """
+    try:
+        payload = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "permissions": {
+                "can_send_messages": True,
+                "can_send_media_messages": True,
+                "can_send_other_messages": True,
+                "can_add_web_page_previews": True,
+            }
+        }
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/restrictChatMember",
+            json=payload,
+            timeout=10,
+        )
+        return response.ok and response.json().get("ok", False)
+    except Exception as e:
+        print(f"❌ Failed unmuting user: {e}")
+        return False
+
+
+def get_chat_member(bot_token, chat_id, user_id):
+    """
+    מחזיר מידע על משתמש בצ'אט (כולל הרשאות).
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש
+    
+    Returns:
+        dict: מידע על המשתמש או None אם נכשל
+    """
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/getChatMember",
+            json={"chat_id": chat_id, "user_id": user_id},
+            timeout=10,
+        )
+        if response.ok:
+            result = response.json()
+            if result.get("ok"):
+                return result.get("result")
+        return None
+    except Exception as e:
+        print(f"❌ Failed getting chat member: {e}")
+        return None
+
+
+def is_user_admin(bot_token, chat_id, user_id):
+    """
+    בודק אם משתמש הוא אדמין בצ'אט.
+    
+    Args:
+        bot_token: טוקן הבוט
+        chat_id: מזהה הצ'אט/קבוצה
+        user_id: מזהה המשתמש
+    
+    Returns:
+        bool: האם המשתמש אדמין
+    """
+    member = get_chat_member(bot_token, chat_id, user_id)
+    if member:
+        status = member.get("status", "")
+        return status in ("creator", "administrator")
+    return False
+
+
+def build_message_context(bot_token, message):
+    """
+    בונה אובייקט context עם כל המידע על ההודעה.
+    
+    Args:
+        bot_token: טוקן הבוט
+        message: אובייקט ההודעה מטלגרם
+    
+    Returns:
+        dict: context עם כל המידע הרלוונטי
+    """
+    chat = message.get("chat") or {}
+    from_user = message.get("from") or {}
+    
+    chat_id = chat.get("id")
+    user_id = from_user.get("id")
+    chat_type = chat.get("type", "private")
+    
+    # בדיקה אם השולח הוא אדמין (רק בקבוצות)
+    sender_is_admin = False
+    if chat_type in ("group", "supergroup") and user_id:
+        sender_is_admin = is_user_admin(bot_token, chat_id, user_id)
+    
+    return {
+        "bot_token": bot_token,
+        "chat_id": chat_id,
+        "chat_type": chat_type,  # "private", "group", "supergroup", "channel"
+        "chat_title": chat.get("title"),  # שם הקבוצה (אם רלוונטי)
+        "message_id": message.get("message_id"),
+        "user_id": user_id,
+        "username": from_user.get("username"),
+        "first_name": from_user.get("first_name"),
+        "last_name": from_user.get("last_name"),
+        "is_group": chat_type in ("group", "supergroup"),
+        "is_private": chat_type == "private",
+        "sender_is_admin": sender_is_admin,
+        # פונקציות עזר - מוכנות לשימוש
+        "delete_message": lambda msg_id=None: delete_message(
+            bot_token, chat_id, msg_id or message.get("message_id")
+        ),
+        "ban_user": lambda uid, until=None: ban_user(bot_token, chat_id, uid, until),
+        "kick_user": lambda uid: kick_user(bot_token, chat_id, uid),
+        "mute_user": lambda uid, until=None: mute_user(bot_token, chat_id, uid, until),
+        "unmute_user": lambda uid: unmute_user(bot_token, chat_id, uid),
+        "is_admin": lambda uid: is_user_admin(bot_token, chat_id, uid),
+        "reply": lambda text: send_telegram_message(bot_token, chat_id, text),
+    }
+
+
 @app.route('/<bot_token>', methods=['POST'])
 def telegram_webhook(bot_token):
     """
@@ -505,11 +759,19 @@ def telegram_webhook(bot_token):
 
     if hasattr(plugin, "handle_message"):
         try:
-            # ננסה לשלוח גם user_id אם הפלאגין תומך
+            # בניית context מלא עבור הפלאגין
+            context = build_message_context(bot_token, message)
+            
+            # ננסה לשלוח עם context, אחר כך user_id, אחר כך בלי כלום
+            reply = None
             try:
-                reply = plugin.handle_message(text, user_id)
+                reply = plugin.handle_message(text, user_id, context)
             except TypeError:
-                reply = plugin.handle_message(text)
+                try:
+                    reply = plugin.handle_message(text, user_id)
+                except TypeError:
+                    reply = plugin.handle_message(text)
+            
             if reply:
                 send_telegram_message(bot_token, chat_id, reply)
         except Exception as e:

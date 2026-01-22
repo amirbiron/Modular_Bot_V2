@@ -88,9 +88,9 @@ START_MESSAGE = """🤖 *ברוכים הבאים למפעל הבוטים!*
 ✅ כלים: מחשבונים, ממירים, מעצבי טקסט.
 ✅ תוכן: בוטים שמושכים חדשות, קריפטו, או בדיחות.
 ✅ AI: בוטים שעונים תשובות חכמות.
+✅ ניהול קבוצות: אנטי-ספאם, מחיקת הודעות, באן משתמשים.
 
 *מה עדיין אני לא יודע לבנות?* ⚠️
-❌ בוטים לניהול קבוצות (מחיקת הודעות, אנטי-ספאם).
 ❌ בוטים שצריכים לרוץ ברקע באופן קבוע (תזכורות אוטומטיות).
 
 *פקודות זמינות:*
@@ -220,10 +220,11 @@ CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מו
        "icon": "bi-icon-name"  # Bootstrap Icon
    }
 
-2. handle_message(text, user_id=None) - מקבלת טקסט ומזהה משתמש:
+2. handle_message(text, user_id=None, context=None) - מקבלת טקסט, מזהה משתמש ו-context:
    - הפלאגין צריך להגיב לכל הודעה שנשלחת אליו (כי זה בוט עצמאי)
    - מבצע לוגיקה ומחזיר תשובה (string)
    - user_id מאפשר לזהות משתמשים ולשמור מידע ייחודי לכל אחד
+   - context מכיל מידע נוסף ופונקציות לניהול קבוצות (ראה בהמשך)
 
 === PERSISTENT STORAGE - MongoDB Helper Functions ===
 
@@ -249,11 +250,49 @@ Example usage:
 IMPORTANT: Do NOT import or define these functions - they are already available!
 Do NOT use global variables (like users = {} or scores = []) - use save_state/load_state instead.
 
+=== GROUP MANAGEMENT - Context Object ===
+
+The context parameter contains information about the message and helper functions for group management:
+
+Context properties (read-only):
+   context["chat_id"]        - The chat/group ID
+   context["chat_type"]      - "private", "group", "supergroup", or "channel"
+   context["chat_title"]     - Group name (None for private chats)
+   context["message_id"]     - The message ID (for deletion)
+   context["user_id"]        - Sender's user ID
+   context["username"]       - Sender's username (may be None)
+   context["first_name"]     - Sender's first name
+   context["is_group"]       - True if this is a group/supergroup
+   context["is_private"]     - True if this is a private chat
+   context["sender_is_admin"] - True if the sender is an admin in the group
+
+Context functions (for group management):
+   context["delete_message"](message_id=None) - Delete a message (current message if no ID given)
+   context["ban_user"](user_id, until_date=None) - Ban a user from the group
+   context["kick_user"](user_id) - Kick user (can rejoin)
+   context["mute_user"](user_id, until_date=None) - Mute a user
+   context["unmute_user"](user_id) - Unmute a user
+   context["is_admin"](user_id) - Check if a user is admin
+   context["reply"](text) - Send a reply to the chat
+
+Example - Anti-spam bot that deletes messages with links from non-admins:
+   def handle_message(text, user_id=None, context=None):
+       if context and context["is_group"]:
+           if "http" in text.lower() and not context["sender_is_admin"]:
+               context["delete_message"]()
+               return f"⚠️ {context['first_name']}, קישורים מותרים רק לאדמינים!"
+       return None
+
+IMPORTANT: 
+- context may be None for older bots or the main bot - always check before using!
+- The bot must be an ADMIN in the group to use management functions
+- Always check sender_is_admin before allowing dangerous commands
+
 === CRITICAL TECHNICAL CONSTRAINTS ===
 
-Passive Mode Only: The bot can only reply to messages it receives. It CANNOT proactively listen to channels or forward messages automatically in the background without a trigger.
+Passive Mode Only: The bot can only reply to messages it receives. It CANNOT proactively send scheduled messages or run background tasks without a trigger.
 
-Refusal: If the user asks for a "Group Manager", "Auto-Forwarder", or "Spam Filter", politely explain that you cannot build these types of bots yet.
+Refusal: If the user asks for "Auto-Forwarder" or automatic scheduled messages, politely explain that you cannot build these types of bots yet (requires background workers).
 
 === הנחיות קריטיות ליצירת הקוד ===
 
