@@ -1,17 +1,21 @@
 # Architect Plugin - creates new plugins via GitHub API
+# תומך ביצירת בוטים חדשים עבור מערכת SaaS
 
 import base64
+import json
+import os
 import re
 import requests
 
 from config import Config
 
 
-COMMAND_PREFIX = "/newbot"
+COMMAND_PREFIX = "/create_bot"
 GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
+BOT_REGISTRY_FILE = "bot_registry.json"
 CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה.
 
 עליך לייצר קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו.
@@ -28,17 +32,20 @@ CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מו
    }
 
 2. handle_message(text) - מקבלת טקסט מהמשתמש:
-   - אם הטקסט מתחיל בפקודה הרלוונטית (למשל /name) - מבצעת לוגיקה ומחזירה תשובה (string)
-   - אחרת - מחזירה None
+   - הפלאגין צריך להגיב לכל הודעה שנשלחת אליו (כי זה בוט עצמאי)
+   - מבצע לוגיקה ומחזיר תשובה (string)
 
 כללים חשובים:
 - החזר אך ורק את הקוד, ללא הסברים, ללא markdown, ללא ```python
 - הקוד חייב להיות תקין ומוכן להרצה
 - אם צריך לגשת ל-API חיצוני, השתמש ב-requests עם timeout
-- תפוס שגיאות בצורה נכונה והחזר הודעת שגיאה ידידותית"""
+- תפוס שגיאות בצורה נכונה והחזר הודעת שגיאה ידידותית
+- הבוט הזה יהיה עצמאי ולכן צריך להגיב לכל הודעה"""
 SUCCESS_MESSAGE = (
-    "הקוד נשמר בגיטהאב. ה-Deploy האוטומטי של Render התחיל! "
-    "בעוד 2 דקות הבוט יהיה פעיל"
+    "✅ הבוט נוצר בהצלחה!\n"
+    "📦 הקוד נשמר בגיטהאב\n"
+    "🔗 Webhook הוגדר לטלגרם\n"
+    "⏳ ה-Deploy האוטומטי של Render התחיל - בעוד 2 דקות הבוט יהיה פעיל"
 )
 
 
@@ -46,7 +53,7 @@ def get_dashboard_widget():
     return {
         "title": "Architect",
         "value": "Ready",
-        "label": "Create new plugins with /newbot",
+        "label": "Create new bots with /create_bot",
         "status": "info",
         "icon": "bi-building",
     }
@@ -222,6 +229,132 @@ def _github_create_file(settings, path, content):
     return False, f"שגיאה ביצירת הקובץ בגיטהאב: {response.status_code} {error_text}"
 
 
+def _github_get_file(settings, path):
+    """
+    קורא קובץ מגיטהאב ומחזיר את התוכן וה-SHA.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{settings['user']}/{settings['repo']}/contents/{path}"
+    params = {}
+    if settings.get("branch"):
+        params["ref"] = settings["branch"]
+
+    response = requests.get(
+        url, headers=_github_headers(settings["token"]), params=params, timeout=10
+    )
+    if response.status_code == 200:
+        data = response.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"], None
+    if response.status_code == 404:
+        return None, None, None
+    return None, None, f"שגיאה בקריאת הקובץ: {response.status_code}"
+
+
+def _github_update_file(settings, path, content, sha, message):
+    """
+    מעדכן קובץ קיים בגיטהאב.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{settings['user']}/{settings['repo']}/contents/{path}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "sha": sha,
+    }
+    if settings.get("branch"):
+        payload["branch"] = settings["branch"]
+
+    response = requests.put(
+        url, headers=_github_headers(settings["token"]), json=payload, timeout=10
+    )
+    if response.status_code in (200, 201):
+        return True, None
+    
+    error_text = response.text
+    try:
+        error_text = response.json()
+    except Exception:
+        pass
+    return False, f"שגיאה בעדכון הקובץ בגיטהאב: {response.status_code} {error_text}"
+
+
+def _add_bot_to_registry(settings, bot_token, plugin_filename):
+    """
+    מוסיף בוט חדש לקובץ הרישום בגיטהאב.
+    """
+    # קרא את הקובץ הקיים
+    content, sha, error = _github_get_file(settings, BOT_REGISTRY_FILE)
+    
+    if error:
+        return False, error
+    
+    # אם הקובץ לא קיים, צור אותו
+    if content is None:
+        registry = {}
+        # צור קובץ חדש
+        registry[bot_token] = plugin_filename
+        new_content = json.dumps(registry, indent=2, ensure_ascii=False)
+        return _github_create_file(settings, BOT_REGISTRY_FILE, new_content)
+    
+    # עדכן את הרישום הקיים
+    try:
+        registry = json.loads(content)
+    except json.JSONDecodeError:
+        registry = {}
+    
+    registry[bot_token] = plugin_filename
+    new_content = json.dumps(registry, indent=2, ensure_ascii=False)
+    
+    return _github_update_file(
+        settings, 
+        BOT_REGISTRY_FILE, 
+        new_content, 
+        sha,
+        f"Add bot {plugin_filename} to registry"
+    )
+
+
+def _set_telegram_webhook(bot_token):
+    """
+    מגדיר webhook לטלגרם עבור הבוט החדש.
+    """
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not render_url:
+        return False, "חסר RENDER_EXTERNAL_URL בקונפיגורציה"
+    
+    webhook_url = f"{render_url.rstrip('/')}/{bot_token}"
+    api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    
+    try:
+        response = requests.post(
+            api_url,
+            json={"url": webhook_url},
+            timeout=10
+        )
+        if response.ok:
+            result = response.json()
+            if result.get("ok"):
+                return True, None
+            return False, f"Telegram API error: {result.get('description', 'Unknown error')}"
+        return False, f"שגיאה בהגדרת webhook: {response.status_code}"
+    except Exception as e:
+        return False, f"שגיאה בהגדרת webhook: {e}"
+
+
+def _generate_plugin_name_from_token(bot_token):
+    """
+    יוצר שם פלאגין בטוח מהטוקן.
+    משתמש בחלק הראשון של הטוקן (ה-bot_id).
+    """
+    # הטוקן בפורמט: BOT_ID:HASH
+    # ניקח את ה-bot_id ונוסיף prefix
+    if ':' in bot_token:
+        bot_id = bot_token.split(':')[0]
+    else:
+        bot_id = bot_token[:10]
+    
+    return f"bot_{bot_id}"
+
+
 def handle_message(text):
     if not text:
         return None
@@ -232,29 +365,46 @@ def handle_message(text):
 
     parts = stripped.split(maxsplit=2)
     if len(parts) < 3:
-        return "שימוש: /newbot <name> <instruction>"
+        return "שימוש: /create_bot <token> <instruction>\nדוגמה: /create_bot 123456:ABC-DEF בוט שמספר בדיחות"
 
-    _, name, instruction = parts
-    if not _is_valid_name(name):
-        return "שם פלאגין לא חוקי. השתמש באותיות, מספרים וקו תחתון בלבד."
+    _, bot_token, instruction = parts
+    
+    # וידוא שהטוקן נראה תקין (פורמט בסיסי)
+    if ':' not in bot_token or len(bot_token) < 20:
+        return "טוקן לא תקין. וודא שהעתקת את הטוקן המלא מ-BotFather."
+
+    # יצירת שם פלאגין מהטוקן
+    plugin_name = _generate_plugin_name_from_token(bot_token)
 
     settings, error = _get_github_settings()
     if error:
         return error
 
-    plugin_path = f"plugins/{name}.py"
+    plugin_path = f"plugins/{plugin_name}.py"
     exists, error = _github_file_exists(settings, plugin_path)
     if error:
         return error
     if exists:
-        return "פלאגין בשם הזה כבר קיים."
+        return "בוט עם טוקן זה כבר קיים במערכת."
 
-    code, error = _generate_plugin_code(name, instruction)
+    # יצירת קוד הפלאגין
+    code, error = _generate_plugin_code(plugin_name, instruction)
     if error:
         return error
 
+    # שמירת הקוד בגיטהאב
     created, error = _github_create_file(settings, plugin_path, code)
     if not created:
         return error or "יצירת הבוט נכשלה."
+
+    # הוספת הבוט לרישום
+    registered, error = _add_bot_to_registry(settings, bot_token, f"{plugin_name}.py")
+    if not registered:
+        return f"הקוד נשמר אבל הרישום נכשל: {error}"
+
+    # הגדרת webhook לטלגרם
+    webhook_set, error = _set_telegram_webhook(bot_token)
+    if not webhook_set:
+        return f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
 
     return SUCCESS_MESSAGE

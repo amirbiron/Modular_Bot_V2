@@ -1,12 +1,14 @@
 """
 Engine - ליבת המערכת
 מנוע Flask עם טעינה דינמית של פלאגינים
+תומך ב-SaaS עם מספר בוטים של משתמשים שונים
 """
 
 from flask import Flask, render_template, request
 import importlib
 import sys
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
@@ -24,6 +26,7 @@ from config import Config
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 PLUGINS_DIR = PROJECT_ROOT / "plugins"
+BOT_REGISTRY_PATH = PROJECT_ROOT / "bot_registry.json"
 PLUGINS_CACHE = {}
 
 # Flask defaults to searching for templates relative to this module/package.
@@ -60,6 +63,72 @@ def set_webhook():
 
 # Register webhook once on server startup
 set_webhook()
+
+
+def load_bot_registry():
+    """
+    טוען את קובץ הרישום של הבוטים.
+    
+    Returns:
+        dict: מיפוי בין token לבין plugin_filename
+    """
+    if not BOT_REGISTRY_PATH.exists():
+        return {}
+    
+    try:
+        with open(BOT_REGISTRY_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"❌ Error loading bot registry: {e}")
+        return {}
+
+
+def save_bot_registry(registry):
+    """
+    שומר את קובץ הרישום של הבוטים.
+    
+    Args:
+        registry: dict - מיפוי בין token לבין plugin_filename
+    """
+    try:
+        with open(BOT_REGISTRY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+        return True
+    except IOError as e:
+        print(f"❌ Error saving bot registry: {e}")
+        return False
+
+
+def load_plugin_by_name(plugin_name):
+    """
+    טוען פלאגין ספציפי לפי שם.
+    
+    Args:
+        plugin_name: שם הפלאגין (ללא סיומת .py)
+    
+    Returns:
+        module: מודול הפלאגין או None אם נכשל
+    """
+    if plugin_name in PLUGINS_CACHE:
+        return PLUGINS_CACHE[plugin_name]
+    
+    plugin_path = PLUGINS_DIR / f"{plugin_name}.py"
+    if not plugin_path.exists():
+        print(f"❌ Plugin file not found: {plugin_name}")
+        return None
+    
+    try:
+        importlib.invalidate_caches()
+        plugin_module = importlib.import_module(f"plugins.{plugin_name}")
+        PLUGINS_CACHE[plugin_name] = plugin_module
+        print(f"✅ Plugin loaded: {plugin_name}")
+        return plugin_module
+    except ImportError as e:
+        print(f"❌ Failed to load plugin '{plugin_name}': {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error loading plugin '{plugin_name}': {e}")
+        return None
 
 
 def load_plugins():
@@ -145,25 +214,29 @@ def health():
     return {"status": "healthy", "bot": Config.BOT_NAME}
 
 
-if config.TELEGRAM_TOKEN:
-    @app.route(f'/{config.TELEGRAM_TOKEN}', methods=['POST'])
-    def telegram_webhook():
-        """
-        מקבל עדכונים מטלגרם, מפנה טקסט לפלאגינים, ושולח תשובה חזרה אם פלאגין החזיר מחרוזת.
-        """
-        update = request.get_json(silent=True) or {}
+@app.route('/<bot_token>', methods=['POST'])
+def telegram_webhook(bot_token):
+    """
+    מקבל עדכונים מטלגרם עבור בוט ספציפי.
+    טוען את הפלאגין המשויך לטוקן ומפעיל את handle_message שלו.
+    תומך גם בטוקן הראשי (מ-config) וגם בבוטים רשומים ב-bot_registry.
+    """
+    update = request.get_json(silent=True) or {}
 
-        message = update.get("message") or {}
-        text = message.get("text")
+    message = update.get("message") or {}
+    text = message.get("text")
 
-        # רק הודעות טקסט מעניינות אותנו כרגע
-        if not text:
-            return {"ok": True}
+    # רק הודעות טקסט מעניינות אותנו כרגע
+    if not text:
+        return {"ok": True}
 
-        chat_id = (message.get("chat") or {}).get("id")
-        if chat_id is None:
-            return {"ok": True}
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return {"ok": True}
 
+    # בדיקה אם זה הטוקן הראשי (הבוט המקורי)
+    if config.TELEGRAM_TOKEN and bot_token == config.TELEGRAM_TOKEN:
+        # התנהגות מקורית - טען את כל הפלאגינים
         plugins = load_plugins()
         for plugin in plugins:
             if hasattr(plugin, "handle_message"):
@@ -176,15 +249,46 @@ if config.TELEGRAM_TOKEN:
                 if isinstance(reply, str) and reply:
                     try:
                         requests.post(
-                            f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMessage",
+                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
                             json={"chat_id": chat_id, "text": reply},
                             timeout=10,
                         )
                     except Exception as e:
                         print(f"❌ Failed sending Telegram message: {e}")
                     break
-
         return {"ok": True}
+
+    # בדיקה אם הטוקן רשום ב-bot_registry
+    registry = load_bot_registry()
+    if bot_token not in registry:
+        print(f"⚠️ Unknown bot token received: {bot_token[:10]}...")
+        return {"ok": True}
+
+    plugin_filename = registry[bot_token]
+    # הסר את סיומת .py אם קיימת
+    plugin_name = plugin_filename.replace('.py', '')
+    
+    plugin = load_plugin_by_name(plugin_name)
+    if not plugin:
+        print(f"❌ Failed to load plugin for bot: {plugin_name}")
+        return {"ok": True}
+
+    if hasattr(plugin, "handle_message"):
+        try:
+            reply = plugin.handle_message(text)
+            if isinstance(reply, str) and reply:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": reply},
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"❌ Failed sending Telegram message: {e}")
+        except Exception as e:
+            print(f"❌ Error in handle_message for {plugin.__name__}: {e}")
+
+    return {"ok": True}
 
 
 if __name__ == '__main__':
