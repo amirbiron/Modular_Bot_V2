@@ -93,25 +93,25 @@ def _generate_plugin_code(name, instruction):
     if not api_key:
         return None, "חסר ANTHROPIC_API_KEY בקונפיגורציה."
 
-    user_prompt = _build_user_prompt(name, instruction)
-    payload = {
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 1500,
-        "system": CLAUDE_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_prompt}],
+    data = {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4000,
+        "messages": [{"role": "user", "content": instruction}],
     }
     try:
         response = requests.post(
             ANTHROPIC_API_URL,
             headers=_anthropic_headers(api_key),
-            json=payload,
+            json=data,
             timeout=20,
         )
+        response.raise_for_status()
     except requests.RequestException:
+        try:
+            print(f"Claude API Error: {response.text}")
+        except Exception:
+            pass
         return None, "שירות Claude לא זמין כרגע. נסה שוב מאוחר יותר."
-
-    if response.status_code != 200:
-        return None, _format_claude_error(response)
 
     try:
         response_payload = response.json()
