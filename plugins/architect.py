@@ -132,6 +132,79 @@ INVALID_TOKEN_MESSAGE = """⚠️ הטוקן לא נראה תקין.
 `123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`
 
 נסה שוב או שלח /cancel לביטול."""
+
+# קוד עזר לשמירת מצב - יתווסף אוטומטית לכל בוט שנוצר
+STATE_HELPER_CODE = '''# === MongoDB State Helpers (auto-generated) ===
+import os
+from pymongo import MongoClient
+
+_state_mongo_client = None
+_state_mongo_db = None
+BOT_ID = "{bot_id}"
+
+def _get_state_db():
+    """מחזיר חיבור ל-MongoDB לשמירת מצב."""
+    global _state_mongo_client, _state_mongo_db
+    if _state_mongo_db is None:
+        mongo_uri = os.environ.get("MONGO_URI")
+        if mongo_uri:
+            try:
+                _state_mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+                _state_mongo_db = _state_mongo_client.get_database("bot_factory")
+            except Exception:
+                return None
+    return _state_mongo_db
+
+def save_state(user_id, key, value):
+    """
+    שומר מידע ב-MongoDB עבור משתמש ספציפי.
+    
+    Args:
+        user_id: מזהה המשתמש
+        key: מפתח לשמירה (כמו "score", "game_state", "preferences")
+        value: הערך לשמירה (יכול להיות מספר, מחרוזת, רשימה או מילון)
+    
+    Returns:
+        bool: האם השמירה הצליחה
+    """
+    db = _get_state_db()
+    if db is None:
+        return False
+    try:
+        db.bot_states.update_one(
+            {"bot_id": BOT_ID, "user_id": str(user_id), "key": key},
+            {"$set": {"value": value}},
+            upsert=True
+        )
+        return True
+    except Exception:
+        return False
+
+def load_state(user_id, key, default=None):
+    """
+    טוען מידע מ-MongoDB עבור משתמש ספציפי.
+    
+    Args:
+        user_id: מזהה המשתמש
+        key: מפתח לטעינה
+        default: ערך ברירת מחדל אם המפתח לא קיים
+    
+    Returns:
+        הערך השמור או ערך ברירת המחדל
+    """
+    db = _get_state_db()
+    if db is None:
+        return default
+    try:
+        doc = db.bot_states.find_one({"bot_id": BOT_ID, "user_id": str(user_id), "key": key})
+        return doc.get("value", default) if doc else default
+    except Exception:
+        return default
+
+# === End of State Helpers ===
+
+'''
+
 CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה.
 
 עליך לייצר קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו.
@@ -147,13 +220,36 @@ CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מו
        "icon": "bi-icon-name"  # Bootstrap Icon
    }
 
-2. handle_message(text) - מקבלת טקסט מהמשתמש:
+2. handle_message(text, user_id=None) - מקבלת טקסט ומזהה משתמש:
    - הפלאגין צריך להגיב לכל הודעה שנשלחת אליו (כי זה בוט עצמאי)
    - מבצע לוגיקה ומחזיר תשובה (string)
+   - user_id מאפשר לזהות משתמשים ולשמור מידע ייחודי לכל אחד
+
+=== PERSISTENT STORAGE - MongoDB Helper Functions ===
+
+Two helper functions are pre-injected into every bot for saving/loading user data:
+
+save_state(user_id, key, value) - Saves data to MongoDB
+   - user_id: The user's Telegram ID (passed to handle_message)
+   - key: A string key like "score", "game_state", "preferences"
+   - value: Any JSON-serializable value (int, str, list, dict)
+   - Returns: True if saved successfully, False otherwise
+
+load_state(user_id, key, default=None) - Loads data from MongoDB
+   - user_id: The user's Telegram ID
+   - key: The key to load
+   - default: Value to return if key doesn't exist
+   - Returns: The saved value or default
+
+Example usage:
+   score = load_state(user_id, "score", 0)
+   score += 10
+   save_state(user_id, "score", score)
+
+IMPORTANT: Do NOT import or define these functions - they are already available!
+Do NOT use global variables (like users = {} or scores = []) - use save_state/load_state instead.
 
 === CRITICAL TECHNICAL CONSTRAINTS ===
-
-Stateless Architecture: The bot runs on a serverless-like environment. Do NOT use global variables (like users = {} or state = []) to store data, as they will be reset frequently. If the user asks for storage, warn them that data is temporary.
 
 Passive Mode Only: The bot can only reply to messages it receives. It CANNOT proactively listen to channels or forward messages automatically in the background without a trigger.
 
@@ -666,7 +762,11 @@ def _generate_plugin_code(name, instruction):
     if not code:
         return None, "Claude לא החזיר קוד."
 
-    return code, None
+    # הוספת פונקציות העזר לשמירת מצב בתחילת הקוד
+    helper_code = STATE_HELPER_CODE.format(bot_id=name)
+    full_code = helper_code + code
+
+    return full_code, None
 
 
 def _get_github_settings():
