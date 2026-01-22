@@ -14,7 +14,7 @@ import requests
 from pathlib import Path
 
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 
 from config import Config
 from engine.app import log_funnel_event
@@ -509,6 +509,33 @@ def _get_flow(flow_id):
     if db is None or not flow_id:
         return None
     return db.bot_flows.find_one({"_id": flow_id})
+
+
+def _is_token_used_in_flow(bot_token_id, exclude_flow_id=None):
+    """
+    בודק אם ה-bot_token_id כבר קיים ב-flow אחר.
+    
+    Args:
+        bot_token_id: מזהה הטוקן (החלק הראשון לפני הנקודתיים)
+        exclude_flow_id: flow_id לא לספור (כדי לא לספור את ה-flow הנוכחי)
+    
+    Returns:
+        bool: האם הטוקן כבר בשימוש
+    """
+    db = _get_mongo_db()
+    if db is None or not bot_token_id:
+        return False
+    
+    try:
+        query = {"bot_token_id": bot_token_id}
+        if exclude_flow_id:
+            query["_id"] = {"$ne": exclude_flow_id}
+        
+        existing = db.bot_flows.find_one(query)
+        return existing is not None
+    except Exception as e:
+        print(f"❌ Error checking token in flows: {e}")
+        return False
 
 
 def _get_user_active_flow(user_id):
@@ -1361,7 +1388,38 @@ def handle_message(text, user_id=None):
             
             # שמירת הטוקן ומעבר לשלב הבא
             bot_token_id = stripped.split(':')[0] if ':' in stripped else None
-            _update_flow(flow_id, status="waiting_description", stage=2, bot_token_id=bot_token_id)
+            
+            # בדיקה אם הטוקן כבר בשימוש ב-flow אחר
+            if _is_token_used_in_flow(bot_token_id, exclude_flow_id=flow_id):
+                log_funnel_event(user_id, "token_already_used", flow_id=flow_id,
+                                 bot_token_id=bot_token_id,
+                                 metadata={"error": "duplicate_token_in_flow"})
+                _set_user_state(user_id, None)
+                _update_flow(flow_id, final_status="failed")
+                return {
+                    "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\nאם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                    "parse_mode": "Markdown",
+                    "reply_markup": _create_inline_keyboard([
+                        [{"text": "🚀 התחל מחדש", "callback_data": "create_bot"}]
+                    ])
+                }
+            
+            try:
+                _update_flow(flow_id, status="waiting_description", stage=2, bot_token_id=bot_token_id)
+            except DuplicateKeyError:
+                # מקרה קצה - טוקן נוסף בין הבדיקה לעדכון
+                log_funnel_event(user_id, "token_already_used", flow_id=flow_id,
+                                 bot_token_id=bot_token_id,
+                                 metadata={"error": "duplicate_key_error"})
+                _set_user_state(user_id, None)
+                return {
+                    "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                    "parse_mode": "Markdown",
+                    "reply_markup": _create_inline_keyboard([
+                        [{"text": "🚀 התחל מחדש", "callback_data": "create_bot"}]
+                    ])
+                }
+            
             _set_user_state(user_id, "waiting_description", token=stripped, flow_id=flow_id)
             
             log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
@@ -1416,11 +1474,15 @@ def handle_message(text, user_id=None):
         
         if flow_id and ':' in bot_token and len(bot_token) >= 20:
             bot_token_id = bot_token.split(':')[0]
-            _update_flow(flow_id, status="waiting_description", stage=2,
-                         bot_token_id=bot_token_id)
-            log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
-                             bot_token_id=bot_token_id,
-                             unique_key=f"token_{flow_id}")
+            try:
+                _update_flow(flow_id, status="waiting_description", stage=2,
+                             bot_token_id=bot_token_id)
+                log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
+                                 bot_token_id=bot_token_id,
+                                 unique_key=f"token_{flow_id}")
+            except DuplicateKeyError:
+                # טוקן כבר בשימוש - לא נעצור את התהליך, פשוט לא נעדכן את ה-flow
+                print(f"⚠️ Token {bot_token_id} already used in another flow")
         
         return _create_bot(bot_token, instruction, user_id, flow_id=flow_id)
     
@@ -1433,7 +1495,11 @@ def _fail_flow(flow_id, user_id, bot_token_id, error_message):
     """
     if not flow_id:
         return
-    _update_flow(flow_id, status="failed", final_status="failed", bot_token_id=bot_token_id)
+    try:
+        _update_flow(flow_id, status="failed", final_status="failed", bot_token_id=bot_token_id)
+    except DuplicateKeyError:
+        # אם יש כפילות, נעדכן בלי ה-bot_token_id
+        _update_flow(flow_id, status="failed", final_status="failed")
     log_funnel_event(user_id, "creation_failed", flow_id=flow_id,
                      bot_token_id=bot_token_id,
                      metadata={"error": error_message})
@@ -1463,7 +1529,14 @@ def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
     
     # עדכון flow לשלב יצירה + לוג תיאור
     if flow_id:
-        _update_flow(flow_id, status="creating", stage=3, bot_token_id=bot_token_id)
+        try:
+            _update_flow(flow_id, status="creating", stage=3, bot_token_id=bot_token_id)
+        except DuplicateKeyError:
+            # טוקן כבר בשימוש ב-flow אחר
+            return {
+                "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\nאם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                "parse_mode": "Markdown"
+            }
         log_funnel_event(user_id, "description_submitted", flow_id=flow_id,
                          bot_token_id=bot_token_id,
                          unique_key=f"desc_{flow_id}")
