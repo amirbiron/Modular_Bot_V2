@@ -83,6 +83,16 @@ START_MESSAGE = """🤖 *ברוכים הבאים למפעל הבוטים!*
 • שלח /newbot ועקוב אחר ההוראות
 • קבל את הטוקן והעתק אותו
 
+*מה אני יודע לבנות מצוין?* 🚀
+✅ משחקים: טריוויה, איש תלוי, ניחוש מספרים.
+✅ כלים: מחשבונים, ממירים, מעצבי טקסט.
+✅ תוכן: בוטים שמושכים חדשות, קריפטו, או בדיחות.
+✅ AI: בוטים שעונים תשובות חכמות.
+
+*מה עדיין אני לא יודע לבנות?* ⚠️
+❌ בוטים לניהול קבוצות (מחיקת הודעות, אנטי-ספאם).
+❌ בוטים שצריכים לרוץ ברקע באופן קבוע (תזכורות אוטומטיות).
+
 *פקודות זמינות:*
 /start - תפריט ראשי
 /create\\_bot - יצירת בוט חדש (עם כפתורים)
@@ -140,6 +150,14 @@ CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מו
 2. handle_message(text) - מקבלת טקסט מהמשתמש:
    - הפלאגין צריך להגיב לכל הודעה שנשלחת אליו (כי זה בוט עצמאי)
    - מבצע לוגיקה ומחזיר תשובה (string)
+
+=== CRITICAL TECHNICAL CONSTRAINTS ===
+
+Stateless Architecture: The bot runs on a serverless-like environment. Do NOT use global variables (like users = {} or state = []) to store data, as they will be reset frequently. If the user asks for storage, warn them that data is temporary.
+
+Passive Mode Only: The bot can only reply to messages it receives. It CANNOT proactively listen to channels or forward messages automatically in the background without a trigger.
+
+Refusal: If the user asks for a "Group Manager", "Auto-Forwarder", or "Spam Filter", politely explain that you cannot build these types of bots yet.
 
 === הנחיות קריטיות ליצירת הקוד ===
 
