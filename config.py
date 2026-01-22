@@ -23,6 +23,9 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH")
 # Anthropic (for Architect plugin)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# Admin notifications
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # Telegram chat ID for alerts
+
 
 class Config:
     """הגדרות כלליות לדשבורד הבוט"""
@@ -57,6 +60,9 @@ class Config:
 
     # Anthropic (for Architect plugin)
     ANTHROPIC_API_KEY = ANTHROPIC_API_KEY
+
+    # Admin notifications
+    ADMIN_CHAT_ID = ADMIN_CHAT_ID
 
 
 # Convenience module-level aliases (for engine/app.py usage)
