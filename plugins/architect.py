@@ -10,13 +10,13 @@ from config import Config
 COMMAND_PREFIX = "/newbot"
 GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_MODEL = "claude-3-5-sonnet"
+ANTHROPIC_MODEL = "claude-4-5-sonnet"
 ANTHROPIC_VERSION = "2023-06-01"
 CLAUDE_SYSTEM_PROMPT = (
-    "אתה מפתח פייתון מומחה. עליך לייצר קוד לפלאגין במערכת מודולרית. "
-    "הקוד חייב לכלול פונקציית get_dashboard_widget() שמחזירה מילון עיצובי "
-    "ופונקציית handle_message(text) שמבצעת את הלוגיקה המבוקשת. "
-    "החזר אך ורק את הקוד, ללא הסברים מסביב"
+    "אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה ועליך לייצר "
+    "קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו. הקוד חייב לכלול פונקציית "
+    "get_dashboard_widget() שמחזירה מילון עיצובי ופונקציית handle_message(text) "
+    "שמבצעת את הלוגיקה המבוקשת. החזר אך ורק את הקוד, ללא הסברים מסביב"
 )
 SUCCESS_MESSAGE = (
     "הקוד נשמר בגיטהאב. ה-Deploy האוטומטי של Render התחיל! "
