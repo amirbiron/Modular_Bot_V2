@@ -1194,9 +1194,10 @@ def _github_update_file(settings, path, content, sha, message):
 
 
 
-def _set_telegram_webhook(bot_token):
+def _set_telegram_webhook(bot_token, max_retries=3):
     """
     מגדיר webhook לטלגרם עבור הבוט החדש.
+    כולל retry logic עם exponential backoff.
     """
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
     if not render_url:
@@ -1205,20 +1206,36 @@ def _set_telegram_webhook(bot_token):
     webhook_url = f"{render_url.rstrip('/')}/{bot_token}"
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     
-    try:
-        response = requests.post(
-            api_url,
-            json={"url": webhook_url},
-            timeout=10
-        )
-        if response.ok:
-            result = response.json()
-            if result.get("ok"):
-                return True, None
-            return False, f"Telegram API error: {result.get('description', 'Unknown error')}"
-        return False, f"שגיאה בהגדרת webhook: {response.status_code}"
-    except Exception as e:
-        return False, f"שגיאה בהגדרת webhook: {e}"
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            # timeout גדל עם כל ניסיון: 30, 45, 60 שניות
+            timeout = 30 + (attempt * 15)
+            response = requests.post(
+                api_url,
+                json={"url": webhook_url},
+                timeout=timeout
+            )
+            if response.ok:
+                result = response.json()
+                if result.get("ok"):
+                    if attempt > 0:
+                        print(f"✅ Webhook set successfully on attempt {attempt + 1}")
+                    return True, None
+                return False, f"Telegram API error: {result.get('description', 'Unknown error')}"
+            last_error = f"שגיאה בהגדרת webhook: {response.status_code}"
+        except requests.exceptions.Timeout:
+            last_error = f"Timeout בניסיון {attempt + 1}/{max_retries}"
+            print(f"⏳ Webhook timeout (attempt {attempt + 1}/{max_retries}), retrying...")
+        except Exception as e:
+            last_error = f"שגיאה בהגדרת webhook: {e}"
+            print(f"⚠️ Webhook error (attempt {attempt + 1}/{max_retries}): {e}")
+        
+        # המתנה לפני ניסיון נוסף (exponential backoff: 2, 4, 8 שניות)
+        if attempt < max_retries - 1:
+            time.sleep(2 ** (attempt + 1))
+    
+    return False, last_error
 
 
 def _generate_plugin_name_from_token(bot_token):
@@ -1618,9 +1635,24 @@ def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
         # הגדרת webhook לטלגרם
         webhook_set, error = _set_telegram_webhook(bot_token)
         if not webhook_set:
-            error_message = f"הקוד נשמר והבוט נרשם, אבל הגדרת ה-Webhook נכשלה: {error}"
-            _fail_flow(flow_id, user_id, bot_token_id, error_message)
-            return error_message
+            # הבוט נוצר בהצלחה אבל ה-webhook נכשל
+            # זה לא נחשב ככישלון כי הבוט יעבוד אחרי ה-deploy הבא
+            print(f"⚠️ Webhook setup failed for {plugin_name}: {error}")
+            
+            if flow_id:
+                _update_flow(flow_id, status="created_webhook_pending", stage=4)
+                log_funnel_event(user_id, "bot_created_webhook_pending", flow_id=flow_id,
+                                 bot_token_id=bot_token_id,
+                                 metadata={"webhook_error": str(error)},
+                                 unique_key=f"created_{flow_id}")
+            
+            return (
+                "✅ הבוט נוצר בהצלחה!\n"
+                "📦 הקוד נשמר בגיטהאב\n"
+                "🔗 *שים לב:* הגדרת ה-Webhook נכשלה זמנית (בעיית רשת)\n\n"
+                "⏳ אל דאגה! הבוט יתחיל לעבוד אוטומטית בעוד כ-7 דקות עם ה-Deploy הבא.\n"
+                "שלח `/start` בבוט החדש לאחר מכן לבדיקה 🚀"
+            )
 
         print(f"✅ Webhook set for bot: {plugin_name}")
 
