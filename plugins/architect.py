@@ -12,12 +12,30 @@ GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
-CLAUDE_SYSTEM_PROMPT = (
-    "אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה ועליך לייצר "
-    "קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו. הקוד חייב לכלול פונקציית "
-    "get_dashboard_widget() שמחזירה מילון עיצובי ופונקציית handle_message(text) "
-    "שמבצעת את הלוגיקה המבוקשת. החזר אך ורק את הקוד, ללא הסברים מסביב"
-)
+CLAUDE_SYSTEM_PROMPT = """אתה המוח מאחורי 'מפעל בוטים מודולרי'. אתה מפתח פייתון מומחה.
+
+עליך לייצר קוד פייתון מושלם שמתאים למבנה הפלאגינים שלנו.
+
+הקוד חייב לכלול בדיוק שתי פונקציות:
+
+1. get_dashboard_widget() - מחזירה מילון עם המבנה הבא:
+   {
+       "title": "שם הפלאגין",
+       "value": "ערך להצגה",
+       "label": "תיאור קצר",
+       "status": "success/warning/danger/info",
+       "icon": "bi-icon-name"  # Bootstrap Icon
+   }
+
+2. handle_message(text) - מקבלת טקסט מהמשתמש:
+   - אם הטקסט מתחיל בפקודה הרלוונטית (למשל /name) - מבצעת לוגיקה ומחזירה תשובה (string)
+   - אחרת - מחזירה None
+
+כללים חשובים:
+- החזר אך ורק את הקוד, ללא הסברים, ללא markdown, ללא ```python
+- הקוד חייב להיות תקין ומוכן להרצה
+- אם צריך לגשת ל-API חיצוני, השתמש ב-requests עם timeout
+- תפוס שגיאות בצורה נכונה והחזר הודעת שגיאה ידידותית"""
 SUCCESS_MESSAGE = (
     "הקוד נשמר בגיטהאב. ה-Deploy האוטומטי של Render התחיל! "
     "בעוד 2 דקות הבוט יהיה פעיל"
@@ -73,6 +91,20 @@ def _format_claude_error(response):
     return f"שגיאה בשירות Claude: {response.status_code} {error_text}"
 
 
+def _clean_code_from_markdown(code):
+    """Remove markdown code fences if Claude returned them despite instructions."""
+    code = code.strip()
+    # Remove ```python or ``` at the start
+    if code.startswith("```python"):
+        code = code[9:]
+    elif code.startswith("```"):
+        code = code[3:]
+    # Remove ``` at the end
+    if code.endswith("```"):
+        code = code[:-3]
+    return code.strip()
+
+
 def _extract_claude_code(payload):
     content = payload.get("content") if isinstance(payload, dict) else None
     if not isinstance(content, list):
@@ -85,7 +117,9 @@ def _extract_claude_code(payload):
     ]
     if not text_parts:
         return None
-    return "\n".join(text_parts).strip()
+    
+    raw_code = "\n".join(text_parts).strip()
+    return _clean_code_from_markdown(raw_code)
 
 
 def _generate_plugin_code(name, instruction):
@@ -93,10 +127,12 @@ def _generate_plugin_code(name, instruction):
     if not api_key:
         return None, "חסר ANTHROPIC_API_KEY בקונפיגורציה."
 
+    user_prompt = _build_user_prompt(name, instruction)
     data = {
-        "model": "claude-sonnet-4-5-20250929",
+        "model": ANTHROPIC_MODEL,
         "max_tokens": 4000,
-        "messages": [{"role": "user", "content": instruction}],
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_prompt}],
     }
     try:
         response = requests.post(
