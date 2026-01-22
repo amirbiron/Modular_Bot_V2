@@ -24,6 +24,9 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
 
+# הגבלת יצירת בוטים למשתמש ליום
+MAX_BOTS_PER_USER_PER_DAY = 2
+
 # נתיב לתיקיית הפרויקט
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -470,7 +473,7 @@ def _notify_admin(message, error_type="general"):
         print(f"❌ Failed to notify admin: {e}")
 
 
-def _register_bot_in_mongodb(bot_token, plugin_filename):
+def _register_bot_in_mongodb(bot_token, plugin_filename, user_id=None):
     """
     רושם בוט חדש ב-MongoDB.
     זה מאפשר לבוט החדש לעבוד מיד.
@@ -478,6 +481,7 @@ def _register_bot_in_mongodb(bot_token, plugin_filename):
     Args:
         bot_token: טוקן הבוט
         plugin_filename: שם קובץ הפלאגין
+        user_id: מזהה המשתמש שיצר את הבוט (אופציונלי)
     
     Returns:
         tuple: (success: bool, error: str or None)
@@ -487,14 +491,21 @@ def _register_bot_in_mongodb(bot_token, plugin_filename):
         return False, "MongoDB לא מוגדר. הוסף MONGO_URI למשתני הסביבה."
     
     try:
+        # בניית המסמך לשמירה
+        doc = {
+            "token": bot_token,
+            "plugin_filename": plugin_filename,
+            "created_at": datetime.datetime.utcnow()
+        }
+        
+        # הוספת מזהה היוצר אם קיים
+        if user_id:
+            doc["created_by_user_id"] = str(user_id)
+        
         # upsert - עדכן אם קיים, צור אם לא
         db.bot_registry.update_one(
             {"token": bot_token},
-            {"$set": {
-                "token": bot_token,
-                "plugin_filename": plugin_filename,
-                "created_at": datetime.datetime.utcnow()
-            }},
+            {"$set": doc},
             upsert=True
         )
         print(f"✅ Bot registered in MongoDB: {plugin_filename}")
@@ -524,6 +535,62 @@ def _bot_exists_in_mongodb(bot_token):
     except Exception as e:
         print(f"❌ Error checking bot in MongoDB: {e}")
         return False
+
+
+def _get_user_bots_created_today(user_id):
+    """
+    מחזיר את מספר הבוטים שהמשתמש יצר ב-24 השעות האחרונות.
+    
+    Args:
+        user_id: מזהה המשתמש בטלגרם
+    
+    Returns:
+        int: מספר הבוטים שנוצרו היום
+    """
+    if not user_id:
+        return 0
+    
+    db = _get_mongo_db()
+    if db is None:
+        return 0
+    
+    try:
+        # חישוב תאריך לפני 24 שעות
+        twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+        
+        # ספירת בוטים שנוצרו על ידי המשתמש ב-24 שעות האחרונות
+        count = db.bot_registry.count_documents({
+            "created_by_user_id": str(user_id),
+            "created_at": {"$gte": twenty_four_hours_ago}
+        })
+        return count
+    except Exception as e:
+        print(f"❌ Error counting user bots: {e}")
+        return 0
+
+
+def _can_user_create_bot(user_id):
+    """
+    בודק אם המשתמש יכול ליצור בוט נוסף (לא עבר את המגבלה היומית).
+    
+    Args:
+        user_id: מזהה המשתמש בטלגרם
+    
+    Returns:
+        tuple: (can_create: bool, bots_created_today: int)
+    """
+    if not user_id:
+        # אם אין user_id, נאפשר יצירה (לתאימות אחורה)
+        return True, 0
+    
+    # אדמין לא מוגבל
+    admin_chat_id = Config.ADMIN_CHAT_ID
+    if admin_chat_id and str(user_id) == str(admin_chat_id):
+        return True, 0
+    
+    bots_created_today = _get_user_bots_created_today(user_id)
+    can_create = bots_created_today < MAX_BOTS_PER_USER_PER_DAY
+    return can_create, bots_created_today
 
 
 def _get_admin_stats(user_id):
@@ -974,10 +1041,23 @@ def handle_callback(callback_data, user_id):
         dict או str: התגובה לשליחה למשתמש
     """
     if callback_data == "create_bot":
+        # בדיקת מגבלה יומית לפני התחלת התהליך
+        can_create, bots_today = _can_user_create_bot(user_id)
+        if not can_create:
+            return {
+                "text": f"⚠️ *הגעת למגבלה היומית!*\n\nיצרת כבר {bots_today} בוטים ב-24 השעות האחרונות.\n\nהמגבלה היא {MAX_BOTS_PER_USER_PER_DAY} בוטים ליום.\nנסה שוב מחר 🙏",
+                "parse_mode": "Markdown"
+            }
+        
         # המשתמש לחץ על "צור בוט חדש"
         _set_user_state(user_id, "waiting_token")
+        
+        # הוספת מידע על המגבלה
+        remaining = MAX_BOTS_PER_USER_PER_DAY - bots_today
+        limit_info = f"\n\n📊 _נותרו לך {remaining} בוטים להיום_" if bots_today > 0 else ""
+        
         return {
-            "text": WAITING_TOKEN_MESSAGE,
+            "text": WAITING_TOKEN_MESSAGE + limit_info,
             "parse_mode": "Markdown"
         }
     
@@ -1030,7 +1110,27 @@ def handle_message(text, user_id=None):
     # פקודת /create_bot - התחלת תהליך יצירה (גם דרך פקודה)
     if stripped == "/create_bot":
         if user_id:
+            # בדיקת מגבלה יומית לפני התחלת התהליך
+            can_create, bots_today = _can_user_create_bot(user_id)
+            if not can_create:
+                return {
+                    "text": f"⚠️ *הגעת למגבלה היומית!*\n\nיצרת כבר {bots_today} בוטים ב-24 השעות האחרונות.\n\nהמגבלה היא {MAX_BOTS_PER_USER_PER_DAY} בוטים ליום.\nנסה שוב מחר 🙏",
+                    "parse_mode": "Markdown"
+                }
+            
             _set_user_state(user_id, "waiting_token")
+            
+            # הוספת מידע על המגבלה
+            remaining = MAX_BOTS_PER_USER_PER_DAY - bots_today
+            limit_info = f"\n\n📊 _נותרו לך {remaining} בוטים להיום_" if bots_today > 0 else ""
+            
+            return {
+                "text": WAITING_TOKEN_MESSAGE + limit_info,
+                "parse_mode": "Markdown",
+                "reply_markup": _create_inline_keyboard([
+                    [{"text": "❌ ביטול", "callback_data": "cancel"}]
+                ])
+            }
         return {
             "text": WAITING_TOKEN_MESSAGE,
             "parse_mode": "Markdown",
@@ -1077,8 +1177,8 @@ def handle_message(text, user_id=None):
             # ניקוי מצב השיחה
             _set_user_state(user_id, None)
             
-            # יצירת הבוט
-            return _create_bot(bot_token, instruction)
+            # יצירת הבוט - כולל מזהה המשתמש לבדיקת מגבלות
+            return _create_bot(bot_token, instruction, user_id)
     
     # תמיכה בפקודה הישירה (לתאימות אחורה)
     if stripped.startswith(COMMAND_PREFIX):
@@ -1092,18 +1192,19 @@ def handle_message(text, user_id=None):
             }
         
         _, bot_token, instruction = parts
-        return _create_bot(bot_token, instruction)
+        return _create_bot(bot_token, instruction, user_id)
     
     return None
 
 
-def _create_bot(bot_token, instruction):
+def _create_bot(bot_token, instruction, user_id=None):
     """
     יוצר בוט חדש.
     
     Args:
         bot_token: טוקן הבוט מ-BotFather
         instruction: תיאור מה הבוט צריך לעשות
+        user_id: מזהה המשתמש שיוצר את הבוט (לבדיקת מגבלות)
     
     Returns:
         str: הודעת הצלחה או שגיאה
@@ -1111,6 +1212,12 @@ def _create_bot(bot_token, instruction):
     # וידוא שהטוקן נראה תקין (פורמט בסיסי)
     if ':' not in bot_token or len(bot_token) < 20:
         return "טוקן לא תקין. וודא שהעתקת את הטוקן המלא מ-BotFather."
+
+    # בדיקת מגבלת יצירת בוטים יומית
+    can_create, bots_today = _can_user_create_bot(user_id)
+    if not can_create:
+        remaining_text = f"יצרת כבר {bots_today} בוטים ב-24 השעות האחרונות."
+        return f"⚠️ הגעת למגבלה היומית!\n\n{remaining_text}\n\nהמגבלה היא {MAX_BOTS_PER_USER_PER_DAY} בוטים ליום.\nנסה שוב מחר 🙏"
 
     # בדיקה אם יש כבר תהליך יצירה פעיל לטוקן זה (מניעת כפילויות)
     if _is_creation_in_progress(bot_token):
@@ -1136,7 +1243,7 @@ def _create_bot(bot_token, instruction):
         return "בוט עם טוקן זה כבר קיים במערכת (קובץ הפלאגין קיים). אם תרצה ליצור בוט חדש, השתמש בטוקן אחר."
 
     # הודעה שהתהליך התחיל
-    print(f"🚀 Starting bot creation for token: {bot_token[:10]}...")
+    print(f"🚀 Starting bot creation for token: {bot_token[:10]}... (user: {user_id})")
     
     # סימון שתהליך היצירה התחיל (למניעת כפילויות מ-webhook)
     _start_creation(bot_token)
@@ -1154,8 +1261,8 @@ def _create_bot(bot_token, instruction):
 
         print(f"✅ Plugin file created on GitHub: {plugin_path}")
 
-        # רישום הבוט ב-MongoDB (מאובטח - לא חשוף בגיטהאב)
-        registered, error = _register_bot_in_mongodb(bot_token, f"{plugin_name}.py")
+        # רישום הבוט ב-MongoDB (מאובטח - לא חשוף בגיטהאב) - כולל מזהה היוצר
+        registered, error = _register_bot_in_mongodb(bot_token, f"{plugin_name}.py", user_id)
         if not registered:
             return f"הקוד נשמר אבל הרישום ב-MongoDB נכשל: {error}"
 
