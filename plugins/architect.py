@@ -134,6 +134,7 @@ INVALID_TOKEN_MESSAGE = """⚠️ הטוקן לא נראה תקין.
 נסה שוב או שלח /cancel לביטול."""
 
 # קוד עזר לשמירת מצב - יתווסף אוטומטית לכל בוט שנוצר
+# Note: Double curly braces {{ }} are escaped for .format() - they become single { } in output
 STATE_HELPER_CODE = '''# === MongoDB State Helpers (auto-generated) ===
 import os
 from pymongo import MongoClient
@@ -172,8 +173,8 @@ def save_state(user_id, key, value):
         return False
     try:
         db.bot_states.update_one(
-            {"bot_id": BOT_ID, "user_id": str(user_id), "key": key},
-            {"$set": {"value": value}},
+            {{"bot_id": BOT_ID, "user_id": str(user_id), "key": key}},
+            {{"$set": {{"value": value}}}},
             upsert=True
         )
         return True
@@ -196,7 +197,7 @@ def load_state(user_id, key, default=None):
     if db is None:
         return default
     try:
-        doc = db.bot_states.find_one({"bot_id": BOT_ID, "user_id": str(user_id), "key": key})
+        doc = db.bot_states.find_one({{"bot_id": BOT_ID, "user_id": str(user_id), "key": key}})
         return doc.get("value", default) if doc else default
     except Exception:
         return default
