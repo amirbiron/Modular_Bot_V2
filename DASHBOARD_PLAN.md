@@ -1,5 +1,7 @@
 # תוכנית מימוש - דשבורד משפך ההמרה (Conversion Funnel)
 
+## גרסה: V2 (Production Grade)
+
 ## סקירה כללית
 
 **מטרה:** לבנות דשבורד שמציג את משפך ההמרה של משתמשים שיוצרים בוטים, כדי לזהות היכן משתמשים "נופלים" בתהליך.
@@ -7,91 +9,239 @@
 **שלבי המשפך:**
 1. **התחילו שיחה** - משתמש שלח `/start` לבוט הראשי
 2. **ביקשו בוט** - משתמש לחץ על "צור בוט חדש" או שלח `/create_bot`
-3. **קיבלו קוד** - הבוט נוצר בהצלחה (נשמר בגיטהאב + MongoDB)
-4. **הריצו בהצלחה** - הבוט החדש קיבל הודעה ראשונה מהמשתמש
+3. **שלחו טוקן** - משתמש שלח טוקן תקין
+4. **שלחו תיאור** - משתמש תיאר את הבוט
+5. **קיבלו קוד** - הבוט נוצר בהצלחה (נשמר בגיטהאב + MongoDB)
+6. **הריצו בהצלחה** - **היוצר** בדק את הבוט (לא סתם מישהו)
 
 ---
 
 ## חלק 1: איסוף נתונים (Data Collection)
 
-### 1.1 מבנה אירועי המשפך ב-MongoDB
+### 1.1 🏗️ ארכיטקטורה: שני Collections
 
-נוסיף collection חדש בשם `funnel_events`:
+#### Collection 1: `bot_flows` - מקור האמת (Source of Truth)
+
+**למה צריך את זה?**
+- שמירת `flow_id` בזיכרון (`_user_conversations`) = אסון בהמתנה
+- ריסט לשרת = איבוד כל המידע
+- מספר instances = race conditions
+- אין יכולת לחשב "זמן בכל שלב"
+
+**הפתרון:** Collection שמשמש כ"תיק רפואי" לכל ניסיון יצירה:
 
 ```javascript
+// bot_flows - מצב התהליך (Source of Truth)
 {
-  "_id": ObjectId,
-  "user_id": "123456789",           // מזהה טלגרם
-  "flow_id": "f_abc123def456",      // 🆔 מזהה ייחודי לניסיון יצירה (חדש!)
-  "event_type": "started_chat",      // סוג האירוע
-  "bot_token_id": "8447253005",     // ID הבוט (בלי ה-hash) - אופציונלי
-  "timestamp": ISODate("2025-01-22T10:30:00Z"),
-  "metadata": {                      // מידע נוסף לפי הצורך
-    "description_preview": "בוט טריוויה...",
-    "error_type": "invalid_token"   // אם נכשל
-  }
+  "_id": "f_abc123def456",           // flow_id הוא ה-primary key
+  "user_id": "123456789",            // מזהה טלגרם
+  "creator_id": "123456789",         // 🔑 מי יצר - לזיהוי Activation אמיתי!
+  "status": "waiting_token",         // הסטטוס הנוכחי
+  "current_stage": 2,                // מספר השלב (לחישוב משפך קל)
+  "bot_token_id": null,              // מתמלא כשמקבלים טוקן
+  "created_at": ISODate(...),
+  "updated_at": ISODate(...),
+  "completed_at": null,              // מתמלא בסיום (הצלחה/כישלון/ביטול)
+  "final_status": null               // "created" | "failed" | "cancelled"
 }
 ```
 
-### 1.1.1 🆔 זיהוי סשן (Flow ID) - קריטי!
+**סטטוסים אפשריים:**
+| status | stage | תיאור |
+|--------|-------|-------|
+| `started` | 1 | התחיל תהליך יצירה |
+| `waiting_token` | 1 | ממתין לטוקן |
+| `waiting_description` | 2 | קיבל טוקן, ממתין לתיאור |
+| `creating` | 3 | בתהליך יצירה (Claude + GitHub) |
+| `created` | 4 | הבוט נוצר בהצלחה ✅ |
+| `activated` | 5 | היוצר הפעיל את הבוט ✅✅ |
+| `failed` | - | נכשל |
+| `cancelled` | - | בוטל ע"י המשתמש |
 
-**הבעיה:** אם משתמש ניסה ליצור בוט בבוקר ונכשל, ואז בערב ניסה שוב והצליח - 
-בלי `flow_id` הוא ייספר כ"הצלחה" בשני המקרים (כי `addToSet` מאחד לפי `user_id`).
-נפספס את הכישלון של הבוקר!
+#### Collection 2: `funnel_events` - לוג אירועים (למטרות Debug ו-TTL)
 
-**הפתרון:** כל ניסיון יצירה מקבל `flow_id` ייחודי:
+```javascript
+// funnel_events - אירועים בודדים (עם TTL)
+{
+  "_id": "evt_activation_f_abc123",  // מפתח ייחודי למניעת כפילויות!
+  "flow_id": "f_abc123def456",
+  "user_id": "123456789",
+  "event_type": "bot_first_message_by_creator",
+  "bot_token_id": "8447253005",
+  "timestamp": ISODate(...),
+  "metadata": { ... }
+}
+```
+
+### 1.1.1 🆔 זיהוי סשן (Flow ID) - Persistent!
+
+**הבעיה הישנה:** `flow_id` נשמר רק בזיכרון (`_user_conversations`)
+
+**הפתרון החדש:** 
+1. כשנוצר `flow_id` - נשמר **מיד** ב-`bot_flows`
+2. `_user_conversations` משמש רק כ-**cache** לביצועים
+3. אם יש restart - אפשר לשחזר state מה-DB
 
 ```python
 import uuid
+from datetime import datetime
 
 def _generate_flow_id():
     """יוצר מזהה ייחודי לניסיון יצירה."""
     return f"f_{uuid.uuid4().hex[:12]}"
+
+def _create_flow(user_id):
+    """יוצר flow חדש ושומר ב-DB מיד."""
+    db = _get_mongo_db()
+    flow_id = _generate_flow_id()
+    
+    db.bot_flows.insert_one({
+        "_id": flow_id,
+        "user_id": str(user_id),
+        "creator_id": str(user_id),  # 🔑 שומרים מי היוצר!
+        "status": "started",
+        "current_stage": 1,
+        "bot_token_id": None,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+        "completed_at": None,
+        "final_status": None
+    })
+    
+    return flow_id
+
+def _update_flow(flow_id, **updates):
+    """מעדכן flow קיים ב-DB."""
+    db = _get_mongo_db()
+    updates["updated_at"] = datetime.utcnow()
+    
+    db.bot_flows.update_one(
+        {"_id": flow_id},
+        {"$set": updates}
+    )
 ```
 
-**מתי נוצר `flow_id`:**
-- כשמשתמש לוחץ על "צור בוט חדש" או שולח `/create_bot`
-- נשמר ב-`_user_conversations[user_id]["flow_id"]`
-- מועבר לכל קריאה של `log_funnel_event` עד סיום/ביטול התהליך
+### 1.2 הגדרת שלבים (Milestones) - חד-פעמיים!
 
-**היתרון:** עכשיו אפשר למדוד:
-- אחוזי הצלחה של **ניסיונות** (לא רק משתמשים)
-- כמה ניסיונות בממוצע לוקח למשתמש להצליח
-- באיזה שלב נופלים הכי הרבה **ניסיונות** (לא משתמשים)
+**עיקרון חשוב:** כל שלב הוא **Milestone חד-פעמי** לכל flow.
+משתמש יכול לשלוח טוקן שגוי 5 פעמים, אבל `submitted_token` נספר רק פעם אחת (כשהצליח).
 
-### 1.2 סוגי אירועים (`event_type`)
+| שלב | stage | event_type | חד-פעמי? | תיאור |
+|-----|-------|------------|----------|-------|
+| 1 | `requested_bot` | `flow_started` | ✅ | התחיל תהליך יצירה |
+| 2 | `submitted_token` | `token_accepted` | ✅ | טוקן תקין התקבל |
+| 3 | `submitted_description` | `description_submitted` | ✅ | תיאור נשלח |
+| 4 | `bot_created` | `bot_created` | ✅ | הבוט נוצר בהצלחה |
+| 5 | `activated` | `bot_activated_by_creator` | ✅ | **היוצר** הפעיל את הבוט |
 
-| אירוע | תיאור | מתי נרשם | flow_id? |
-|-------|-------|----------|----------|
-| `started_chat` | משתמש שלח /start | `architect.py` - handle_message (פקודת /start) | ❌ |
-| `requested_bot` | משתמש התחיל תהליך יצירה | `architect.py` - handle_callback("create_bot") או /create_bot | ✅ נוצר כאן! |
-| `invalid_token` | משתמש שלח טוקן לא תקין | `architect.py` - state="waiting_token" וטוקן לא תקין | ✅ |
-| `submitted_token` | משתמש שלח טוקן תקין | `architect.py` - state="waiting_token" עובר ל-"waiting_description" | ✅ |
-| `submitted_description` | משתמש שלח תיאור | `architect.py` - state="waiting_description" נקרא _create_bot | ✅ |
-| `bot_created` | בוט נוצר בהצלחה | `architect.py` - אחרי SUCCESS_MESSAGE | ✅ |
-| `bot_creation_failed` | יצירה נכשלה | `architect.py` - כל שגיאה ב-_create_bot | ✅ |
-| `flow_cancelled` | משתמש ביטל את התהליך | `architect.py` - handle_message("/cancel") או handle_callback("cancel") | ✅ |
-| `bot_first_message` | הבוט החדש קיבל הודעה ראשונה | `engine/app.py` - telegram_webhook לבוט רשום | ❌ (לפי bot_token_id) |
+**אירועים לא-milestone (יכולים לחזור):**
+| event_type | תיאור |
+|------------|-------|
+| `invalid_token_attempt` | ניסיון טוקן שגוי |
+| `creation_failed` | כישלון יצירה (יכול לנסות שוב) |
+| `flow_cancelled` | ביטול |
 
 ### 1.3 שינויים נדרשים בקוד
 
-#### א. הוספת פונקציית לוג למשפך (`engine/app.py`)
+#### א. פונקציות ניהול Flow (`architect.py`)
 
 ```python
-def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None, metadata=None):
+import uuid
+from datetime import datetime
+from pymongo.errors import DuplicateKeyError
+
+def _create_flow(user_id):
+    """
+    יוצר flow חדש ושומר ב-DB מיד (לא רק בזיכרון!).
+    """
+    db = _get_mongo_db()
+    if db is None:
+        return None
+    
+    flow_id = f"f_{uuid.uuid4().hex[:12]}"
+    
+    try:
+        db.bot_flows.insert_one({
+            "_id": flow_id,
+            "user_id": str(user_id),
+            "creator_id": str(user_id),  # 🔑 קריטי! לזיהוי Activation
+            "status": "started",
+            "current_stage": 1,
+            "bot_token_id": None,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "completed_at": None,
+            "final_status": None
+        })
+        return flow_id
+    except Exception as e:
+        print(f"❌ Failed to create flow: {e}")
+        return None
+
+def _update_flow(flow_id, status=None, stage=None, bot_token_id=None, final_status=None):
+    """
+    מעדכן flow קיים ב-DB.
+    """
+    db = _get_mongo_db()
+    if db is None or not flow_id:
+        return
+    
+    updates = {"updated_at": datetime.utcnow()}
+    
+    if status:
+        updates["status"] = status
+    if stage:
+        updates["current_stage"] = stage
+    if bot_token_id:
+        updates["bot_token_id"] = bot_token_id
+    if final_status:
+        updates["final_status"] = final_status
+        updates["completed_at"] = datetime.utcnow()
+    
+    db.bot_flows.update_one({"_id": flow_id}, {"$set": updates})
+
+def _get_flow(flow_id):
+    """שולף flow מה-DB."""
+    db = _get_mongo_db()
+    if db is None or not flow_id:
+        return None
+    return db.bot_flows.find_one({"_id": flow_id})
+
+def _get_user_active_flow(user_id):
+    """
+    שולף flow פעיל של משתמש (לשחזור אחרי restart).
+    """
+    db = _get_mongo_db()
+    if db is None:
+        return None
+    
+    return db.bot_flows.find_one({
+        "user_id": str(user_id),
+        "final_status": None  # עדיין לא הסתיים
+    }, sort=[("created_at", -1)])  # הכי חדש
+```
+
+#### ב. פונקציית לוג אירועים עם מניעת כפילויות (`engine/app.py`)
+
+```python
+from pymongo.errors import DuplicateKeyError
+
+def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None, 
+                     metadata=None, unique_key=None):
     """
     רושם אירוע במשפך ההמרה.
     
     Args:
         user_id: מזהה המשתמש בטלגרם
-        event_type: סוג האירוע (started_chat, requested_bot, etc.)
-        flow_id: מזהה ייחודי לניסיון היצירה (חשוב למעקב מדויק!)
-        bot_token_id: מזהה הבוט (החלק הראשון של הטוקן, ללא hash)
+        event_type: סוג האירוע
+        flow_id: מזהה ייחודי לניסיון היצירה
+        bot_token_id: מזהה הבוט
         metadata: מידע נוסף (dict)
+        unique_key: מפתח ייחודי למניעת כפילויות (אופציונלי)
     """
     db = get_mongo_db()
     if db is None:
-        return
+        return False
     
     try:
         doc = {
@@ -99,6 +249,11 @@ def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None, metad
             "event_type": event_type,
             "timestamp": datetime.datetime.utcnow()
         }
+        
+        # מפתח ייחודי למניעת כפילויות (למשל: activation_f_abc123)
+        if unique_key:
+            doc["_id"] = unique_key
+        
         if flow_id:
             doc["flow_id"] = flow_id
         if bot_token_id:
@@ -106,26 +261,41 @@ def log_funnel_event(user_id, event_type, flow_id=None, bot_token_id=None, metad
         if metadata:
             doc["metadata"] = metadata
         
-        db.funnel_events.insert_one(doc)
+        # Upsert למניעת race conditions
+        if unique_key:
+            db.funnel_events.update_one(
+                {"_id": unique_key},
+                {"$setOnInsert": doc},
+                upsert=True
+            )
+        else:
+            db.funnel_events.insert_one(doc)
+        
+        return True
+    except DuplicateKeyError:
+        # כבר קיים - זה בסדר, לא שגיאה
+        return False
     except Exception as e:
         print(f"⚠️ Failed to log funnel event: {e}")
+        return False
 ```
 
-#### ב. שינויים ב-`architect.py`
+#### ג. שינויים ב-`architect.py` - ניהול Flow מלא
 
-**חשוב: ניהול flow_id לאורך כל התהליך!**
+**עיקרון: DB הוא מקור האמת, זיכרון הוא רק cache!**
 
 ```python
-import uuid
-
-def _generate_flow_id():
-    """יוצר מזהה ייחודי לניסיון יצירה."""
-    return f"f_{uuid.uuid4().hex[:12]}"
-
-# עדכון _set_user_state לתמיכה ב-flow_id:
+# עדכון _set_user_state - עכשיו עם סנכרון ל-DB:
 def _set_user_state(user_id, state, token=None, flow_id=None):
-    """מגדיר את מצב השיחה של המשתמש."""
+    """
+    מגדיר את מצב השיחה של המשתמש.
+    שומר בזיכרון (cache) וגם ב-DB (persistence).
+    """
     if state is None:
+        # ניקוי - גם מזיכרון וגם לסגור flow ב-DB אם פתוח
+        old_flow_id = _user_conversations.get(user_id, {}).get("flow_id")
+        if old_flow_id:
+            _update_flow(old_flow_id, final_status="cancelled")
         _user_conversations.pop(user_id, None)
     else:
         data = {"state": state, "timestamp": time.time()}
@@ -133,61 +303,101 @@ def _set_user_state(user_id, state, token=None, flow_id=None):
             data["token"] = token
         if flow_id:
             data["flow_id"] = flow_id
-        # שמירת ערכים קיימים אם לא סופקו חדשים
         elif user_id in _user_conversations:
-            if "token" in _user_conversations[user_id]:
-                data["token"] = _user_conversations[user_id]["token"]
-            if "flow_id" in _user_conversations[user_id]:
-                data["flow_id"] = _user_conversations[user_id]["flow_id"]
+            data["flow_id"] = _user_conversations[user_id].get("flow_id")
+            data["token"] = _user_conversations[user_id].get("token")
+        
         _user_conversations[user_id] = data
 
 def _get_user_flow_id(user_id):
-    """מחזיר את ה-flow_id של המשתמש."""
-    return _user_conversations.get(user_id, {}).get("flow_id")
+    """
+    מחזיר את ה-flow_id של המשתמש.
+    קודם מזיכרון, אם אין - מנסה לשחזר מ-DB.
+    """
+    # קודם מזיכרון (מהיר)
+    flow_id = _user_conversations.get(user_id, {}).get("flow_id")
+    if flow_id:
+        return flow_id
+    
+    # אם אין בזיכרון - נסה לשחזר מ-DB (אחרי restart)
+    active_flow = _get_user_active_flow(user_id)
+    if active_flow:
+        # שחזור ל-cache
+        _user_conversations[user_id] = {
+            "flow_id": active_flow["_id"],
+            "state": active_flow["status"],
+            "token": None,  # לא שומרים טוקן ב-DB מסיבות אבטחה
+            "timestamp": time.time()
+        }
+        return active_flow["_id"]
+    
+    return None
 ```
 
 **מקום לרישום כל אירוע:**
 
 ```python
-# בתוך handle_message, כש-/start נקלט:
-if stripped == "/start":
-    log_funnel_event(user_id, "started_chat")  # אין flow_id - עדיין לא התחיל תהליך
-    ...
-
 # בתוך handle_callback, כש-create_bot נלחץ:
 if callback_data == "create_bot":
-    flow_id = _generate_flow_id()  # 🆕 יצירת flow_id חדש!
+    # 🆕 יצירת flow חדש ושמירה ב-DB מיד!
+    flow_id = _create_flow(user_id)
+    if not flow_id:
+        return "אירעה שגיאה, נסה שוב"
+    
     _set_user_state(user_id, "waiting_token", flow_id=flow_id)
-    log_funnel_event(user_id, "requested_bot", flow_id=flow_id)
+    _update_flow(flow_id, status="waiting_token", stage=1)
+    
+    log_funnel_event(user_id, "flow_started", flow_id=flow_id,
+                    unique_key=f"start_{flow_id}")  # מניעת כפילות
     ...
 
-# בתוך handle_message, כשמקבלים טוקן תקין:
+# בתוך handle_message, כשמקבלים טוקן:
 if state == "waiting_token":
-    flow_id = _get_user_flow_id(user_id)  # 🆕 שליפת flow_id קיים
+    flow_id = _get_user_flow_id(user_id)
+    bot_token_id = stripped.split(':')[0] if ':' in stripped else None
+    
     if valid_token:
-        log_funnel_event(user_id, "submitted_token", flow_id=flow_id, 
-                        bot_token_id=stripped.split(':')[0])
+        # עדכון DB
+        _update_flow(flow_id, status="waiting_description", stage=2, 
+                    bot_token_id=bot_token_id)
+        _set_user_state(user_id, "waiting_description", token=stripped)
+        
+        log_funnel_event(user_id, "token_accepted", flow_id=flow_id,
+                        bot_token_id=bot_token_id,
+                        unique_key=f"token_{flow_id}")  # milestone חד-פעמי
     else:
-        log_funnel_event(user_id, "invalid_token", flow_id=flow_id,
+        # טוקן שגוי - לא milestone, יכול לחזור
+        log_funnel_event(user_id, "invalid_token_attempt", flow_id=flow_id,
                         metadata={"token_preview": stripped[:10]})
     ...
 
-# בתוך _create_bot, כשמתחיל התהליך:
+# בתוך _create_bot:
 def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
     bot_token_id = bot_token.split(':')[0]
-    log_funnel_event(user_id, "submitted_description", flow_id=flow_id, 
-                    bot_token_id=bot_token_id)
+    
+    # עדכון: בתהליך יצירה
+    _update_flow(flow_id, status="creating", stage=3)
+    
+    log_funnel_event(user_id, "description_submitted", flow_id=flow_id,
+                    bot_token_id=bot_token_id,
+                    unique_key=f"desc_{flow_id}")
     ...
+    
     # אחרי הצלחה:
-    log_funnel_event(user_id, "bot_created", flow_id=flow_id, bot_token_id=bot_token_id)
+    _update_flow(flow_id, status="created", stage=4, final_status="created")
+    log_funnel_event(user_id, "bot_created", flow_id=flow_id, 
+                    bot_token_id=bot_token_id,
+                    unique_key=f"created_{flow_id}")
     return SUCCESS_MESSAGE
     
     # אחרי כישלון:
-    log_funnel_event(user_id, "bot_creation_failed", flow_id=flow_id, 
-                    bot_token_id=bot_token_id, metadata={"error": error_message})
+    _update_flow(flow_id, status="failed", final_status="failed")
+    log_funnel_event(user_id, "creation_failed", flow_id=flow_id,
+                    bot_token_id=bot_token_id,
+                    metadata={"error": error_message})
 ```
 
-#### ג. שינויים ב-`engine/app.py` - לזיהוי הודעה ראשונה
+#### ד. שינויים ב-`engine/app.py` - זיהוי Activation ע"י היוצר
 
 ```python
 def telegram_webhook(bot_token):
@@ -195,167 +405,262 @@ def telegram_webhook(bot_token):
     # עבור בוטים רשומים (לא הבוט הראשי):
     if plugin_filename:
         # בדיקה אם זו ההודעה הראשונה מהיוצר
-        _log_first_message_if_needed(bot_token, user_id)
+        _log_activation_if_creator(bot_token, user_id)
 ```
 
-### 🛠️ נקודה קריטית: איך ה-Engine יודע מה ה-flow_id?
+### 🔑 נקודה קריטית: מי נחשב "הפעלה מוצלחת"?
 
-**הבעיה:** 
-- ה-Engine מקבל webhook מטלגרם ויודע רק את ה-`bot_token`
-- ה-`flow_id` נוצר בזיכרון של ה-Architect ולא מועבר ל-Engine
-- בלי תיקון, לאירוע `bot_first_message` יהיה `flow_id: null`
-- התוצאה: ב-GROUP BY flow_id השלב האחרון יהיה תמיד 0!
+**הבעיה המקורית:** ספרנו "הודעה ראשונה מכל משתמש" - זה לא מדויק!
+- מישהו אחר יכול לשלוח הודעה לבוט
+- ספאם יכול להיספר כ"הפעלה"
+- לא יודעים אם **היוצר** באמת בדק את הבוט שלו
 
-**הפתרון: Enrichment - שליפת ה-flow_id מהאירוע המקורי**
+**הפתרון:** רושמים Activation רק כשה**יוצר המקורי** שולח הודעה לבוט.
 
 ```python
-def _log_first_message_if_needed(bot_token, user_id):
+def _log_activation_if_creator(bot_token, sender_id):
     """
-    רושם אירוע bot_first_message אם זו ההודעה הראשונה.
-    כולל Enrichment - שליפת flow_id מאירוע היצירה המקורי.
+    רושם אירוע Activation רק אם השולח הוא היוצר המקורי.
+    משתמש ב-Upsert למניעת race conditions.
     """
     db = get_mongo_db()
     if db is None:
         return
     
-    # 1. מנרמלים את הטוקן למזהה
     bot_token_id = bot_token.split(':')[0] if ':' in bot_token else bot_token[:10]
     
-    # 2. בודקים אם כבר נרשמה הפעלה ראשונה (למניעת כפילויות)
-    if db.funnel_events.find_one({
-        "event_type": "bot_first_message",
-        "bot_token_id": bot_token_id
-    }):
+    # 1. 🔍 שליפת ה-Flow שיצר את הבוט הזה מ-bot_flows
+    flow_doc = db.bot_flows.find_one({"bot_token_id": bot_token_id})
+    
+    if not flow_doc:
+        # בוט "יתום" - אין לו flow (אולי נוצר לפני המערכת)
         return
     
-    # 3. 🔍 Enrichment: מוצאים את ה-flow_id המקורי שיצר את הבוט
-    #    מחפשים את אירוע 'bot_created' עם אותו bot_token_id
-    creation_event = db.funnel_events.find_one(
-        {"event_type": "bot_created", "bot_token_id": bot_token_id},
-        {"flow_id": 1}  # Projection - מביאים רק את השדה הזה
-    )
+    # 2. 🔑 בדיקה קריטית: האם השולח הוא היוצר?
+    creator_id = flow_doc.get("creator_id")
+    if str(sender_id) != str(creator_id):
+        # זה לא היוצר - לא נספור כ-Activation
+        # (אפשר לרשום אירוע נפרד "bot_message_from_other" אם רוצים)
+        return
     
-    original_flow_id = creation_event.get("flow_id") if creation_event else None
+    flow_id = flow_doc["_id"]
     
-    # 4. רושמים את האירוע עם ה-flow_id (אם נמצא)
-    db.funnel_events.insert_one({
-        "user_id": str(user_id),
-        "event_type": "bot_first_message",
-        "bot_token_id": bot_token_id,
-        "flow_id": original_flow_id,  # <--- סוגר את המעגל!
-        "timestamp": datetime.datetime.utcnow()
-    })
+    # 3. עדכון ה-Flow ל-activated (אם עדיין לא)
+    if flow_doc.get("status") != "activated":
+        db.bot_flows.update_one(
+            {"_id": flow_id, "status": {"$ne": "activated"}},  # רק אם לא כבר activated
+            {"$set": {
+                "status": "activated",
+                "current_stage": 5,
+                "updated_at": datetime.datetime.utcnow()
+            }}
+        )
+    
+    # 4. רישום אירוע עם Upsert (מניעת כפילויות + race conditions)
+    unique_key = f"activation_{flow_id}"
+    
+    try:
+        db.funnel_events.update_one(
+            {"_id": unique_key},
+            {"$setOnInsert": {
+                "_id": unique_key,
+                "user_id": str(sender_id),
+                "flow_id": flow_id,
+                "event_type": "bot_activated_by_creator",  # 🎯 שם מדויק!
+                "bot_token_id": bot_token_id,
+                "timestamp": datetime.datetime.utcnow()
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"⚠️ Error logging activation: {e}")
 ```
 
-**למה זה עובד?**
+**למה זה עובד עכשיו:**
 
-עכשיו כשעושים `GROUP BY flow_id` בדשבורד:
-```
-flow_123 → requested_bot     ✅
-flow_123 → submitted_token   ✅
-flow_123 → bot_created       ✅
-flow_123 → bot_first_message ✅  (בזכות ה-Enrichment!)
-```
+| מצב | תוצאה |
+|-----|-------|
+| היוצר שולח `/start` לבוט שלו | ✅ נספר כ-Activation |
+| חבר של היוצר שולח הודעה | ❌ לא נספר |
+| ספאם נכנס לבוט | ❌ לא נספר |
+| שני webhooks במקביל מאותו יוצר | ✅ נספר פעם אחת (Upsert) |
 
-המשפך שלם! 🎯
+**המשפך שלם ומדויק:**
+```
+flow_123 → flow_started              ✅ (stage 1)
+flow_123 → token_accepted            ✅ (stage 2)
+flow_123 → description_submitted     ✅ (stage 3)
+flow_123 → bot_created               ✅ (stage 4)
+flow_123 → bot_activated_by_creator  ✅ (stage 5) 🎯
+```
 
 ---
 
 ## חלק 2: API לדשבורד
 
-### 2.1 Endpoint חדש: `/api/funnel`
+### 2.1 Endpoint חדש: `/api/funnel` (גרסה משופרת!)
+
+**שיפור קריטי:** במקום לספור "כמה אירועים מכל סוג", נספור "כמה flows הגיעו **לפחות** לשלב X".
+
+זה משפך אמיתי - לא רק ספירת אירועים!
 
 ```python
+from functools import wraps
+
+# 🔐 Decorator לאבטחת API (אדמין בלבד)
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # בדיקת טוקן/סיסמה
+        auth_token = request.headers.get('X-Admin-Token')
+        expected_token = os.environ.get('DASHBOARD_ADMIN_TOKEN')
+        
+        if not expected_token:
+            # אם לא הוגדר טוקן - נאפשר בינתיים (dev mode)
+            pass
+        elif auth_token != expected_token:
+            return {"error": "Unauthorized"}, 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
 @app.route('/api/funnel')
+@admin_required  # 🔐 מוגן!
 def get_funnel_stats():
     """
     מחזיר סטטיסטיקות משפך ההמרה.
     Query params:
         - days: מספר ימים אחורה (ברירת מחדל: 7)
-        - by: "users" (ברירת מחדל) או "flows" (ניסיונות)
+    
+    🆕 שיפור: מחשב משפך אמיתי מ-bot_flows (לא מאירועים!)
     """
     days = request.args.get('days', 7, type=int)
-    by = request.args.get('by', 'users')  # 🆕 תמיכה בשני מצבים
     since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
     
     db = get_mongo_db()
     if db is None:
         return {"error": "Database not connected"}, 500
     
-    # 🆕 בחירת שדה הקיבוץ לפי מצב
-    group_field = "$user_id" if by == "users" else "$flow_id"
-    
-    # ספירת אירועים ייחודיים לכל שלב
+    # 🆕 שאילתה מ-bot_flows - מקור האמת!
+    # מחשבים כמה flows הגיעו לכל שלב (לפי current_stage)
     pipeline = [
-        {"$match": {"timestamp": {"$gte": since}}},
+        {"$match": {"created_at": {"$gte": since}}},
         {"$group": {
-            "_id": "$event_type",
-            "unique_items": {"$addToSet": group_field},
-            "total_count": {"$sum": 1}
+            "_id": None,
+            "total_flows": {"$sum": 1},
+            "reached_stage_1": {"$sum": {"$cond": [{"$gte": ["$current_stage", 1]}, 1, 0]}},
+            "reached_stage_2": {"$sum": {"$cond": [{"$gte": ["$current_stage", 2]}, 1, 0]}},
+            "reached_stage_3": {"$sum": {"$cond": [{"$gte": ["$current_stage", 3]}, 1, 0]}},
+            "reached_stage_4": {"$sum": {"$cond": [{"$gte": ["$current_stage", 4]}, 1, 0]}},
+            "reached_stage_5": {"$sum": {"$cond": [{"$gte": ["$current_stage", 5]}, 1, 0]}},
+            # סטטיסטיקות נוספות
+            "cancelled": {"$sum": {"$cond": [{"$eq": ["$final_status", "cancelled"]}, 1, 0]}},
+            "failed": {"$sum": {"$cond": [{"$eq": ["$final_status", "failed"]}, 1, 0]}},
+            "unique_users": {"$addToSet": "$user_id"}
         }}
     ]
     
-    results = list(db.funnel_events.aggregate(pipeline))
+    results = list(db.bot_flows.aggregate(pipeline))
     
-    # המרה לפורמט נוח
-    funnel = {}
-    for r in results:
-        # 🆕 סינון None (אירועים ללא flow_id כמו started_chat)
-        unique_items = [x for x in r["unique_items"] if x is not None]
-        funnel[r["_id"]] = {
-            "unique_count": len(unique_items),
-            "total_count": r["total_count"]
+    if not results:
+        return {
+            "period_days": days,
+            "total_flows": 0,
+            "funnel": [],
+            "summary": {}
         }
     
-    # חישוב אחוזי המרה
-    # 🆕 שלבים שונים לפי מצב - started_chat לא שייך ל-flow
-    if by == "flows":
-        stages = ["requested_bot", "submitted_token", 
-                  "submitted_description", "bot_created", "bot_first_message"]
-    else:
-        stages = ["started_chat", "requested_bot", "submitted_token", 
-                  "submitted_description", "bot_created", "bot_first_message"]
+    data = results[0]
+    total = data.get("total_flows", 0)
     
+    # בניית המשפך
+    stages = [
+        {"name": "flow_started", "label": "התחילו תהליך", "count": data.get("reached_stage_1", 0)},
+        {"name": "token_accepted", "label": "שלחו טוקן תקין", "count": data.get("reached_stage_2", 0)},
+        {"name": "description_submitted", "label": "שלחו תיאור", "count": data.get("reached_stage_3", 0)},
+        {"name": "bot_created", "label": "הבוט נוצר", "count": data.get("reached_stage_4", 0)},
+        {"name": "bot_activated", "label": "הופעל ע\"י היוצר", "count": data.get("reached_stage_5", 0)},
+    ]
+    
+    # חישוב אחוזים והמרות
     funnel_data = []
     for i, stage in enumerate(stages):
-        data = funnel.get(stage, {"unique_count": 0, "total_count": 0})
-        prev_count = funnel.get(stages[i-1], {}).get("unique_count", 0) if i > 0 else data["unique_count"]
-        conversion_rate = (data["unique_count"] / prev_count * 100) if prev_count > 0 else 0
+        count = stage["count"]
+        prev_count = stages[i-1]["count"] if i > 0 else count
+        
+        # אחוז מהשלב הקודם
+        step_conversion = (count / prev_count * 100) if prev_count > 0 else 0
+        # אחוז מההתחלה
+        overall_conversion = (count / total * 100) if total > 0 else 0
         
         funnel_data.append({
-            "stage": stage,
-            "unique_count": data["unique_count"],
-            "total_count": data["total_count"],
-            "conversion_rate": round(conversion_rate, 1)
+            "stage": stage["name"],
+            "label": stage["label"],
+            "count": count,
+            "step_conversion": round(step_conversion, 1),
+            "overall_conversion": round(overall_conversion, 1),
+            "drop_off": prev_count - count if i > 0 else 0
         })
+    
+    # סיכום
+    summary = {
+        "total_flows": total,
+        "unique_users": len(data.get("unique_users", [])),
+        "successful_creations": data.get("reached_stage_4", 0),
+        "successful_activations": data.get("reached_stage_5", 0),
+        "cancelled": data.get("cancelled", 0),
+        "failed": data.get("failed", 0),
+        "overall_success_rate": round(
+            (data.get("reached_stage_5", 0) / total * 100) if total > 0 else 0, 1
+        ),
+        "avg_attempts_per_user": round(
+            total / len(data.get("unique_users", [1])), 2
+        ) if data.get("unique_users") else 0
+    }
     
     return {
         "period_days": days,
-        "group_by": by,  # 🆕 הצגת מצב הקיבוץ
         "funnel": funnel_data,
-        "drop_offs": _calculate_drop_offs(funnel, stages)
+        "summary": summary
     }
 ```
 
 **דוגמה לתוצאה:**
 
 ```json
-// GET /api/funnel?days=7&by=flows
+// GET /api/funnel?days=7
 {
   "period_days": 7,
-  "group_by": "flows",
   "funnel": [
-    {"stage": "requested_bot", "unique_count": 50, "conversion_rate": 100.0},
-    {"stage": "submitted_token", "unique_count": 40, "conversion_rate": 80.0},
-    {"stage": "submitted_description", "unique_count": 38, "conversion_rate": 95.0},
-    {"stage": "bot_created", "unique_count": 30, "conversion_rate": 78.9},
-    {"stage": "bot_first_message", "unique_count": 25, "conversion_rate": 83.3}
-  ]
+    {"stage": "flow_started", "label": "התחילו תהליך", "count": 50, 
+     "step_conversion": 100.0, "overall_conversion": 100.0, "drop_off": 0},
+    {"stage": "token_accepted", "label": "שלחו טוקן תקין", "count": 40, 
+     "step_conversion": 80.0, "overall_conversion": 80.0, "drop_off": 10},
+    {"stage": "description_submitted", "label": "שלחו תיאור", "count": 38, 
+     "step_conversion": 95.0, "overall_conversion": 76.0, "drop_off": 2},
+    {"stage": "bot_created", "label": "הבוט נוצר", "count": 30, 
+     "step_conversion": 78.9, "overall_conversion": 60.0, "drop_off": 8},
+    {"stage": "bot_activated", "label": "הופעל ע\"י היוצר", "count": 25, 
+     "step_conversion": 83.3, "overall_conversion": 50.0, "drop_off": 5}
+  ],
+  "summary": {
+    "total_flows": 50,
+    "unique_users": 35,
+    "successful_creations": 30,
+    "successful_activations": 25,
+    "cancelled": 8,
+    "failed": 7,
+    "overall_success_rate": 50.0,
+    "avg_attempts_per_user": 1.43
+  }
 }
 ```
 
-עכשיו אפשר לראות ש-**50 ניסיונות** התחילו, אבל רק **30 הצליחו** (60% הצלחה כללית).
-זה יותר מדויק מ"30 משתמשים הצליחו" (כי אולי 10 מהם ניסו פעמיים).
+**מה זה נותן:**
+- 50 ניסיונות התחילו
+- 25 הסתיימו בהפעלה מוצלחת (50% הצלחה כוללת!)
+- 35 משתמשים ייחודיים (חלקם ניסו יותר מפעם אחת)
+- 1.43 ניסיונות בממוצע למשתמש
 
 ### 2.2 Endpoint לשגיאות נפוצות: `/api/funnel/errors`
 
@@ -731,26 +1036,62 @@ document.addEventListener('DOMContentLoaded', loadFunnel);
 
 ## חלק 5: שיקולים נוספים
 
-### אבטחה
-- האם הדשבורד צריך להיות מוגן בסיסמה?
-- האם להגביל גישה רק לאדמין?
+### 🔐 אבטחה (חובה!)
+
+ה-API מכיל מידע מוצרי רגיש. **חובה להגן עליו!**
+
+```python
+# ב-.env או משתני סביבה:
+DASHBOARD_ADMIN_TOKEN=your-secret-token-here
+
+# שימוש:
+# curl -H "X-Admin-Token: your-secret-token-here" https://your-app/api/funnel
+```
+
+**אפשרויות נוספות:**
+- Basic Auth עם user/password
+- הגבלת IP (פחות מומלץ לטווח ארוך)
+- OAuth עם Telegram Login (מתקדם)
 
 ### ביצועים ואינדקסים
 
-אינדקסים נדרשים ב-MongoDB:
+**אינדקסים נדרשים ב-MongoDB:**
 
 ```javascript
+// === bot_flows (Collection חדש!) ===
+
+// אינדקס לשאילתות לפי משתמש ו-flows פעילים
+db.bot_flows.createIndex({user_id: 1, final_status: 1})
+
+// אינדקס לשאילתות לפי bot_token_id (ל-Activation lookup)
+db.bot_flows.createIndex({bot_token_id: 1})
+
+// אינדקס לשאילתות לפי זמן (למשפך)
+db.bot_flows.createIndex({created_at: -1})
+
+// אינדקס לסטטוס (לספירת הצלחות/כישלונות)
+db.bot_flows.createIndex({current_stage: 1, created_at: -1})
+
+
+// === funnel_events ===
+
 // אינדקס לשאילתות לפי זמן ואירוע
 db.funnel_events.createIndex({timestamp: -1, event_type: 1})
 
-// אינדקס לשאילתות לפי משתמש
-db.funnel_events.createIndex({user_id: 1, event_type: 1})
-
-// 🆕 אינדקס לשאילתות לפי flow_id
+// אינדקס לשאילתות לפי flow_id
 db.funnel_events.createIndex({flow_id: 1, event_type: 1})
 
 // אינדקס לשאילתות לפי בוט
 db.funnel_events.createIndex({bot_token_id: 1, event_type: 1})
+```
+
+**Unique Indexes למניעת כפילויות:**
+
+```javascript
+// ה-_id כבר ייחודי, אז נשתמש בו למניעת כפילויות:
+// "_id": "activation_f_abc123" - מונע כפילויות של activation
+// "_id": "created_f_abc123" - מונע כפילויות של created
+// וכו'
 ```
 
 ### 🎈 מניעת Data Bloat - TTL Index
@@ -821,32 +1162,61 @@ def aggregate_daily_funnel():
 
 ---
 
-## סיכום
+## סיכום - גרסה V2 (Production Grade)
 
-התוכנית מציעה מערכת מלאה לניטור משפך ההמרה:
+### מה השתנה מ-V1?
 
-1. **איסוף נתונים** - רישום כל אירוע חשוב בתהליך יצירת הבוט
-2. **🆔 זיהוי סשן (Flow ID)** - מעקב מדויק אחרי כל ניסיון יצירה בנפרד
-3. **API** - endpoints נוחים לשליפת נתונים עם תמיכה ב-users/flows
-4. **ממשק** - דשבורד ויזואלי שמציג את המשפך בצורה ברורה
-5. **תובנות** - זיהוי נקודות נשירה ושגיאות נפוצות
-6. **🎈 מניעת Data Bloat** - TTL Index למחיקה אוטומטית + סיכום יומי
+| נושא | V1 (פרוטוטייפ) | V2 (Production) |
+|------|----------------|-----------------|
+| שמירת State | זיכרון בלבד | MongoDB (`bot_flows`) |
+| עמידות ל-Restart | ❌ איבוד מידע | ✅ שחזור מ-DB |
+| זיהוי Activation | כל הודעה ראשונה | רק מהיוצר המקורי |
+| מניעת כפילויות | `find_one` + `insert` | Upsert + Unique Key |
+| חישוב משפך | ספירת אירועים | "הגיעו לפחות לשלב X" |
+| אבטחת API | ❌ פתוח | ✅ Token נדרש |
 
-### מה נותן לך ה-Flow ID?
+### מה המערכת עכשיו יודעת לספר לך?
 
-| מדד | בלי Flow ID | עם Flow ID |
-|-----|-------------|------------|
-| "30 משתמשים הצליחו" | ✅ | ✅ |
-| "50 ניסיונות נעשו" | ❌ | ✅ |
-| "20 ניסיונות נכשלו" | ❌ | ✅ |
-| "60% הצלחה לניסיון" | ❌ | ✅ |
-| "1.67 ניסיונות בממוצע להצלחה" | ❌ | ✅ |
+| מדד | דוגמה |
+|-----|-------|
+| כמה ניסיונות התחילו | 50 flows |
+| כמה הסתיימו בהצלחה | 25 activations (50%) |
+| כמה משתמשים ייחודיים | 35 users |
+| ממוצע ניסיונות למשתמש | 1.43 |
+| איפה הכי הרבה נשירה | טוקן → תיאור (10 נשרו) |
+| למה נכשלו | "טוקן לא תקין" - 15 מקרים |
+| האם היוצר באמת בדק | ✅ רק creator נספר |
 
-עם המידע הזה, תוכל לדעת בדיוק:
-- כמה אחוז **מהניסיונות** מסתיימים בהצלחה (לא רק משתמשים!)
-- איפה הכי הרבה **ניסיונות** נכשלים
-- כמה ניסיונות בממוצע לוקח להצליח
-- מה השגיאות הנפוצות ביותר
-- האם שיפורים שעשית משפיעים לטובה
+### Collections במערכת
 
-**זמן מימוש משוער: 8-14 שעות עבודה** (קצת יותר בגלל flow_id ו-TTL)
+```
+MongoDB
+├── bot_flows          # 🆕 מקור אמת - מצב כל ניסיון
+├── funnel_events      # לוג אירועים (עם TTL)
+├── bot_registry       # קיים - רישום בוטים
+├── user_actions       # קיים - פעולות משתמשים
+└── funnel_daily_summary  # אופציונלי - סיכום יומי
+```
+
+### שלבי מימוש מעודכנים
+
+| שלב | משימות | זמן |
+|-----|--------|-----|
+| 1 | יצירת `bot_flows` collection + indexes | 1-2 שעות |
+| 2 | עדכון `architect.py` עם persistence | 2-3 שעות |
+| 3 | עדכון `engine/app.py` עם creator validation | 1-2 שעות |
+| 4 | מימוש `/api/funnel` + אבטחה | 2-3 שעות |
+| 5 | UI עם Chart.js | 2-3 שעות |
+| 6 | בדיקות + TTL setup | 1-2 שעות |
+
+**זמן מימוש משוער: 10-15 שעות עבודה**
+
+### מוכן ליישום! 🚀
+
+התוכנית עכשיו:
+- ✅ עמידה בפני restart
+- ✅ מדויקת עסקית (רק creator = activation)
+- ✅ מונעת כפילויות (Upsert)
+- ✅ מחשבת משפך אמיתי (לא רק ספירת אירועים)
+- ✅ מאובטחת (API token)
+- ✅ מונעת התנפחות (TTL)
