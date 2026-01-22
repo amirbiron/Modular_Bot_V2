@@ -198,32 +198,66 @@ def telegram_webhook(bot_token):
         _log_first_message_if_needed(bot_token, user_id)
 ```
 
+### 🛠️ נקודה קריטית: איך ה-Engine יודע מה ה-flow_id?
+
+**הבעיה:** 
+- ה-Engine מקבל webhook מטלגרם ויודע רק את ה-`bot_token`
+- ה-`flow_id` נוצר בזיכרון של ה-Architect ולא מועבר ל-Engine
+- בלי תיקון, לאירוע `bot_first_message` יהיה `flow_id: null`
+- התוצאה: ב-GROUP BY flow_id השלב האחרון יהיה תמיד 0!
+
+**הפתרון: Enrichment - שליפת ה-flow_id מהאירוע המקורי**
+
 ```python
 def _log_first_message_if_needed(bot_token, user_id):
     """
     רושם אירוע bot_first_message אם זו ההודעה הראשונה.
+    כולל Enrichment - שליפת flow_id מאירוע היצירה המקורי.
     """
     db = get_mongo_db()
     if db is None:
         return
     
+    # 1. מנרמלים את הטוקן למזהה
     bot_token_id = bot_token.split(':')[0] if ':' in bot_token else bot_token[:10]
     
-    # בדיקה אם כבר רשמנו הודעה ראשונה לבוט הזה מהמשתמש הזה
-    existing = db.funnel_events.find_one({
-        "bot_token_id": bot_token_id,
-        "user_id": str(user_id),
-        "event_type": "bot_first_message"
-    })
+    # 2. בודקים אם כבר נרשמה הפעלה ראשונה (למניעת כפילויות)
+    if db.funnel_events.find_one({
+        "event_type": "bot_first_message",
+        "bot_token_id": bot_token_id
+    }):
+        return
     
-    if not existing:
-        db.funnel_events.insert_one({
-            "user_id": str(user_id),
-            "event_type": "bot_first_message",
-            "bot_token_id": bot_token_id,
-            "timestamp": datetime.datetime.utcnow()
-        })
+    # 3. 🔍 Enrichment: מוצאים את ה-flow_id המקורי שיצר את הבוט
+    #    מחפשים את אירוע 'bot_created' עם אותו bot_token_id
+    creation_event = db.funnel_events.find_one(
+        {"event_type": "bot_created", "bot_token_id": bot_token_id},
+        {"flow_id": 1}  # Projection - מביאים רק את השדה הזה
+    )
+    
+    original_flow_id = creation_event.get("flow_id") if creation_event else None
+    
+    # 4. רושמים את האירוע עם ה-flow_id (אם נמצא)
+    db.funnel_events.insert_one({
+        "user_id": str(user_id),
+        "event_type": "bot_first_message",
+        "bot_token_id": bot_token_id,
+        "flow_id": original_flow_id,  # <--- סוגר את המעגל!
+        "timestamp": datetime.datetime.utcnow()
+    })
 ```
+
+**למה זה עובד?**
+
+עכשיו כשעושים `GROUP BY flow_id` בדשבורד:
+```
+flow_123 → requested_bot     ✅
+flow_123 → submitted_token   ✅
+flow_123 → bot_created       ✅
+flow_123 → bot_first_message ✅  (בזכות ה-Enrichment!)
+```
+
+המשפך שלם! 🎯
 
 ---
 
@@ -440,17 +474,22 @@ def get_funnel_errors():
     <h2>📊 משפך המרה - יצירת בוטים</h2>
     
     <div class="funnel-controls">
-        <select id="funnel-period">
+        <select id="funnel-period" onchange="loadFunnel()">
             <option value="1">יום אחרון</option>
             <option value="7" selected>7 ימים</option>
             <option value="30">30 ימים</option>
         </select>
-        <button onclick="refreshFunnel()">🔄 רענן</button>
+        
+        <div class="toggle-group">
+            <button id="btn-users" class="toggle-btn active" onclick="setGroupBy('users')">👥 משתמשים</button>
+            <button id="btn-flows" class="toggle-btn" onclick="setGroupBy('flows')">🔄 ניסיונות</button>
+        </div>
+        
+        <button onclick="loadFunnel()">🔄 רענן</button>
     </div>
     
-    <div class="funnel-stages" id="funnel-stages">
-        <!-- נטען דינמית -->
-    </div>
+    <!-- 📊 Chart.js Canvas - הרבה יותר מרשים מ-HTML bars! -->
+    <canvas id="funnelChart" style="max-height: 400px;"></canvas>
     
     <div class="funnel-insights">
         <h3>🚨 נקודות נשירה עיקריות</h3>
@@ -460,18 +499,40 @@ def get_funnel_errors():
         <div id="top-errors"></div>
     </div>
 </div>
+
+<!-- Chart.js CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 ```
 
-### 3.3 קוד JavaScript
+### 3.3 קוד JavaScript עם Chart.js
 
 ```javascript
+let currentChart = null;
+let groupBy = 'flows'; // ברירת מחדל: ניסיונות (יותר מדויק!)
+
+const stageNames = {
+    'started_chat': 'התחילו שיחה',
+    'requested_bot': 'ביקשו בוט',
+    'submitted_token': 'שלחו טוקן',
+    'submitted_description': 'שלחו תיאור',
+    'bot_created': 'הבוט נוצר בהצלחה',
+    'bot_first_message': 'הריצו את הבוט'
+};
+
+function setGroupBy(mode) {
+    groupBy = mode;
+    document.getElementById('btn-users').classList.toggle('active', mode === 'users');
+    document.getElementById('btn-flows').classList.toggle('active', mode === 'flows');
+    loadFunnel();
+}
+
 async function loadFunnel() {
     const days = document.getElementById('funnel-period').value;
     
-    const response = await fetch(`/api/funnel?days=${days}`);
+    const response = await fetch(`/api/funnel?days=${days}&by=${groupBy}`);
     const data = await response.json();
     
-    renderFunnelStages(data.funnel);
+    renderFunnelChart(data.funnel);
     renderDropOffs(data.drop_offs);
     
     const errorsResponse = await fetch(`/api/funnel/errors?days=${days}`);
@@ -479,31 +540,161 @@ async function loadFunnel() {
     renderErrors(errorsData.top_errors);
 }
 
-function renderFunnelStages(stages) {
-    const container = document.getElementById('funnel-stages');
-    const maxUsers = stages[0]?.unique_users || 1;
+function renderFunnelChart(stages) {
+    const ctx = document.getElementById('funnelChart').getContext('2d');
     
-    const stageNames = {
-        'started_chat': 'התחילו שיחה',
-        'requested_bot': 'ביקשו בוט',
-        'submitted_token': 'שלחו טוקן',
-        'submitted_description': 'שלחו תיאור',
-        'bot_created': 'הבוט נוצר בהצלחה',
-        'bot_first_message': 'הריצו את הבוט'
-    };
+    // הרס גרף קיים אם יש
+    if (currentChart) {
+        currentChart.destroy();
+    }
     
-    container.innerHTML = stages.map(stage => {
-        const width = (stage.unique_users / maxUsers) * 100;
-        return `
-            <div class="funnel-stage">
-                <div class="funnel-bar" style="width: ${width}%"></div>
-                <div class="funnel-info">
-                    <span class="stage-name">${stageNames[stage.stage]}</span>
-                    <span class="stage-count">${stage.unique_users} (${stage.conversion_rate}%)</span>
-                </div>
-            </div>
-        `;
-    }).join('');
+    // הכנת נתונים
+    const labels = stages.map(s => stageNames[s.stage] || s.stage);
+    const data = stages.map(s => s.unique_count);
+    const percentages = stages.map(s => s.conversion_rate);
+    
+    // צבעים בגרדיאנט - מכחול לירוק
+    const colors = stages.map((_, i) => {
+        const ratio = i / (stages.length - 1);
+        if (ratio < 0.7) {
+            // כחול עם שקיפות יורדת
+            return `rgba(54, 162, 235, ${0.9 - ratio * 0.4})`;
+        } else {
+            // ירוק להצלחה
+            return `rgba(75, 192, 192, ${0.7 + ratio * 0.3})`;
+        }
+    });
+    
+    currentChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: groupBy === 'users' ? 'משתמשים' : 'ניסיונות',
+                data: data,
+                backgroundColor: colors,
+                borderRadius: 8,
+                borderSkipped: false,
+            }]
+        },
+        options: {
+            indexAxis: 'y', // גרף אופקי - כמו משפך!
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (context) => {
+                            const idx = context.dataIndex;
+                            return `${context.raw} (${percentages[idx]}% המרה)`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(255,255,255,0.1)' }
+                },
+                y: {
+                    grid: { display: false }
+                }
+            }
+        }
+    });
+}
+
+function renderDropOffs(dropOffs) {
+    const container = document.getElementById('drop-offs');
+    if (!dropOffs || dropOffs.length === 0) {
+        container.innerHTML = '<p>אין נתוני נשירה משמעותיים</p>';
+        return;
+    }
+    
+    container.innerHTML = dropOffs.map(d => `
+        <div class="drop-off-item">
+            <span class="drop-off-count">${d.count}</span>
+            <span class="drop-off-text">
+                נשרו בין "${stageNames[d.from_stage]}" ל"${stageNames[d.to_stage]}"
+                <span class="drop-off-percent">(${d.drop_rate}% נשירה)</span>
+            </span>
+        </div>
+    `).join('');
+}
+
+function renderErrors(errors) {
+    const container = document.getElementById('top-errors');
+    if (!errors || errors.length === 0) {
+        container.innerHTML = '<p>אין שגיאות בתקופה זו 🎉</p>';
+        return;
+    }
+    
+    const icons = ['🔴', '🟠', '🟡', '🔵', '⚪'];
+    container.innerHTML = errors.map((e, i) => `
+        <div class="error-item">
+            <span class="error-icon">${icons[i] || '•'}</span>
+            <span class="error-count">${e.count}</span>
+            <span class="error-text">${e.error || 'שגיאה לא מזוהה'}</span>
+        </div>
+    `).join('');
+}
+
+// טעינה ראשונית
+document.addEventListener('DOMContentLoaded', loadFunnel);
+```
+
+### 3.4 CSS נוסף לדשבורד
+
+```css
+.funnel-controls {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.toggle-group {
+    display: flex;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.toggle-btn {
+    padding: 8px 16px;
+    border: none;
+    background: var(--card-bg);
+    color: var(--text-color);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.toggle-btn.active {
+    background: var(--primary-color);
+    color: white;
+}
+
+.drop-off-item, .error-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.drop-off-count, .error-count {
+    font-weight: bold;
+    font-size: 1.2em;
+    min-width: 40px;
+}
+
+.drop-off-percent {
+    color: var(--danger-color);
+    font-size: 0.9em;
 }
 ```
 
