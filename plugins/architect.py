@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 import datetime
+import ast
 import requests
 from pathlib import Path
 
@@ -18,7 +19,6 @@ from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, Dupli
 
 from config import Config
 from engine.app import log_funnel_event
-from engine.plugin_security import validate_user_plugin_source
 
 
 COMMAND_PREFIX = "/create_bot"
@@ -26,6 +26,126 @@ GITHUB_API_BASE = "https://api.github.com"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 ANTHROPIC_VERSION = "2023-06-01"
+
+# --- Security policy (minimal): block "terminal bots" only ---
+_FORBIDDEN_TERMINAL_IMPORT_ROOTS = {
+    "subprocess",
+    "pty",
+    "pexpect",
+    "shlex",
+    # Remote command execution / SSH libs (even if not installed, block intent)
+    "paramiko",
+}
+
+_FORBIDDEN_OS_EXEC_ATTRS = {
+    "system",
+    "popen",
+    "execl",
+    "execle",
+    "execlp",
+    "execlpe",
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "spawnl",
+    "spawnle",
+    "spawnlp",
+    "spawnlpe",
+    "spawnv",
+    "spawnve",
+    "spawnvp",
+    "spawnvpe",
+}
+
+
+def _module_root(name: str) -> str:
+    return name.split(".", 1)[0]
+
+
+def _validate_no_terminal_execution(source: str):
+    """
+    Best-effort static check to prevent "terminal bots".
+
+    This intentionally blocks only process/shell execution patterns, and does NOT
+    block generic file access or env access (so file-sender bots can work).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        # Let the normal pipeline handle syntax errors later.
+        return True, None
+
+    forbidden_aliases = set()
+
+    # First pass: detect forbidden imports and track aliases
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = _module_root(alias.name)
+                if root in _FORBIDDEN_TERMINAL_IMPORT_ROOTS:
+                    return False, f"forbidden_import: {alias.name}"
+                # track alias of forbidden roots just in case (subprocess as sp)
+                if alias.asname and root in _FORBIDDEN_TERMINAL_IMPORT_ROOTS:
+                    forbidden_aliases.add(alias.asname)
+                if root == "subprocess" and alias.asname:
+                    forbidden_aliases.add(alias.asname)
+                if root == "os" and alias.asname:
+                    # Not forbidden, but could hide os.system calls; we handle attrs below by name only.
+                    pass
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = _module_root(node.module)
+            if root in _FORBIDDEN_TERMINAL_IMPORT_ROOTS:
+                return False, f"forbidden_import: {node.module}"
+
+    # Second pass: detect execution calls even without forbidden imports
+    for node in ast.walk(tree):
+        # os.system / os.popen / os.exec* / os.spawn*
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = node.func.value
+            attr = node.func.attr
+
+            if isinstance(base, ast.Name) and base.id == "os" and attr in _FORBIDDEN_OS_EXEC_ATTRS:
+                return False, f"forbidden_os_call: os.{attr}"
+
+            # subprocess.* usage (even if somehow available via alias)
+            if isinstance(base, ast.Name):
+                if base.id == "subprocess" or base.id in forbidden_aliases:
+                    return False, "forbidden_subprocess_usage"
+
+                # shlex is typically used to help shell execution
+                if base.id == "shlex":
+                    return False, "forbidden_shlex_usage"
+
+            # importlib.import_module("subprocess") bypass attempt
+            if (
+                isinstance(base, ast.Name)
+                and base.id == "importlib"
+                and attr == "import_module"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                mod = _module_root(node.args[0].value)
+                if mod in _FORBIDDEN_TERMINAL_IMPORT_ROOTS:
+                    return False, f"forbidden_dynamic_import: {mod}"
+
+        # __import__("subprocess") bypass attempt
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                mod = _module_root(node.args[0].value)
+                if mod in _FORBIDDEN_TERMINAL_IMPORT_ROOTS:
+                    return False, f"forbidden_dynamic_import: {mod}"
+
+        # subprocess.run(..., shell=True)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
+                for kw in node.keywords or []:
+                    if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                        return False, "forbidden_subprocess_shell_true"
+
+    return True, None
+
 
 # הגבלת יצירת בוטים למשתמש ליום
 MAX_BOTS_PER_USER_PER_DAY = 2
@@ -294,16 +414,11 @@ Example usage:
 IMPORTANT: Do NOT import or define these functions - they are already available!
 Do NOT use global variables (like users = {} or scores = []) - use save_state/load_state instead.
 
-=== SECURITY POLICY (MUST FOLLOW) ===
-
-You are generating code that will run on a server. Therefore, the following are STRICTLY FORBIDDEN:
-- Any terminal/shell/process execution: subprocess, os.system, os.popen, pty, shlex, etc.
-- Any dynamic code execution: eval, exec, compile, __import__
-- Any direct file system IO: open(), reading/writing local files
-- Any access to environment variables: os.environ (do NOT read secrets from env)
-
-If the user asks for a "terminal bot", "run commands", "server control", "shell", "ssh", or similar,
-you MUST refuse and instead explain that this is not allowed for security reasons.
+=== SECURITY POLICY (TERMINAL BOTS ARE FORBIDDEN) ===
+Do NOT create bots that run terminal/OS commands or execute processes.
+Forbidden examples: "terminal bot", "run commands", "shell", "bash", "ssh", "server control".
+Technically forbidden APIs/libraries include: subprocess, os.system/os.popen/os.exec*, pty, pexpect, shlex, paramiko.
+If the user asks for any of the above, you MUST refuse politely and offer safe alternatives.
 
 === GROUP MANAGEMENT - Context Object ===
 
@@ -1092,15 +1207,13 @@ def _generate_plugin_code(name, instruction):
     helper_code = STATE_HELPER_CODE.format(bot_id=name)
     full_code = helper_code + code
 
-    # 🛡️ Security validation (best-effort static policy gate)
-    validation = validate_user_plugin_source(full_code)
-    if not validation.ok:
-        # We do NOT return the dangerous code. We fail creation.
+    # 🛡️ Minimal security gate: block terminal execution code only
+    ok, reason = _validate_no_terminal_execution(full_code)
+    if not ok:
         return None, (
             "⛔ יצירת בוט נדחתה מטעמי אבטחה.\n\n"
-            "המערכת לא מאפשרת בוטים שמריצים פקודות שרת/טרמינל, קוראים סודות מהשרת, "
-            "או מבצעים גישה ישירה לקבצים.\n\n"
-            f"פרטי חסימה: {validation.reason}"
+            "המערכת לא מאפשרת בוטים שמריצים פקודות טרמינל/שרת (subprocess/os.system/ssh וכו').\n\n"
+            f"פרטי חסימה: {reason}"
         )
 
     return full_code, None
