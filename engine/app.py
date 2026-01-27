@@ -18,9 +18,6 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 from functools import wraps
 
-# Security validation for user-generated plugins (bot_* only)
-from engine.plugin_security import validate_user_plugin_source
-
 # טעינת משתני סביבה מקובץ .env (אם קיים)
 load_dotenv()
 
@@ -386,21 +383,6 @@ def load_plugin_by_name(plugin_name):
         print(f"❌ Plugin file not found: {plugin_name}")
         return None
     
-    # 🛡️ Refuse unsafe user-generated plugins (defense in depth)
-    if plugin_name.startswith("bot_"):
-        try:
-            source = plugin_path.read_text(encoding="utf-8")
-        except Exception as e:
-            print(f"❌ Failed reading plugin source '{plugin_name}': {e}")
-            delete_failed_plugin(plugin_name, reason=f"ReadError: {e}")
-            return None
-        
-        validation = validate_user_plugin_source(source)
-        if not validation.ok:
-            print(f"⛔ Refusing unsafe plugin '{plugin_name}': {validation.reason}")
-            delete_failed_plugin(plugin_name, reason=f"SecurityPolicy: {validation.reason}")
-            return None
-    
     try:
         importlib.invalidate_caches()
         plugin_module = importlib.import_module(f"plugins.{plugin_name}")
@@ -450,23 +432,6 @@ def load_plugins():
     for plugin_name in sorted(plugin_names):
         if plugin_name in PLUGINS_CACHE:
             continue
-        
-        # 🛡️ Refuse unsafe user-generated plugins (bot_* only)
-        if plugin_name.startswith("bot_"):
-            plugin_path = PLUGINS_DIR / f"{plugin_name}.py"
-            try:
-                source = plugin_path.read_text(encoding="utf-8")
-            except Exception as e:
-                print(f"❌ Failed reading plugin source '{plugin_name}': {e}")
-                delete_failed_plugin(plugin_name, reason=f"ReadError: {e}")
-                continue
-            
-            validation = validate_user_plugin_source(source)
-            if not validation.ok:
-                print(f"⛔ Skipping unsafe plugin '{plugin_name}': {validation.reason}")
-                delete_failed_plugin(plugin_name, reason=f"SecurityPolicy: {validation.reason}")
-                continue
-
         try:
             plugin_module = importlib.import_module(f"plugins.{plugin_name}")
             PLUGINS_CACHE[plugin_name] = plugin_module
