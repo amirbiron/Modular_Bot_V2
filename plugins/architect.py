@@ -1408,13 +1408,18 @@ def handle_message(text, user_id=None):
             
             # בדיקה אם הטוקן כבר בשימוש ב-flow אחר
             if _is_token_used_in_flow(bot_token_id, exclude_flow_id=flow_id):
+                error_message = (
+                    "⚠️ *טוקן זה כבר בשימוש*\n\n"
+                    "נראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\n"
+                    "אם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש."
+                )
                 log_funnel_event(user_id, "token_already_used", flow_id=flow_id,
                                  bot_token_id=bot_token_id,
                                  metadata={"error": "duplicate_token_in_flow"})
                 _set_user_state(user_id, None)
-                _update_flow(flow_id, final_status="failed")
+                _fail_flow(flow_id, user_id, bot_token_id, error_message)
                 return {
-                    "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\nאם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                    "text": error_message,
                     "parse_mode": "Markdown",
                     "reply_markup": _create_inline_keyboard([
                         [{"text": "🚀 התחל מחדש", "callback_data": "create_bot"}]
@@ -1425,12 +1430,17 @@ def handle_message(text, user_id=None):
                 _update_flow(flow_id, status="waiting_description", stage=2, bot_token_id=bot_token_id)
             except DuplicateKeyError:
                 # מקרה קצה - טוקן נוסף בין הבדיקה לעדכון
+                error_message = (
+                    "⚠️ *טוקן זה כבר בשימוש*\n\n"
+                    "נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש."
+                )
                 log_funnel_event(user_id, "token_already_used", flow_id=flow_id,
                                  bot_token_id=bot_token_id,
                                  metadata={"error": "duplicate_key_error"})
                 _set_user_state(user_id, None)
+                _fail_flow(flow_id, user_id, bot_token_id, error_message)
                 return {
-                    "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                    "text": error_message,
                     "parse_mode": "Markdown",
                     "reply_markup": _create_inline_keyboard([
                         [{"text": "🚀 התחל מחדש", "callback_data": "create_bot"}]
@@ -1510,18 +1520,20 @@ def _fail_flow(flow_id, user_id, bot_token_id, error_message):
     """
     מסמן flow ככשלון ושומר אירוע + שולח התראה לאדמין.
     """
-    if not flow_id:
-        return
-    try:
-        _update_flow(flow_id, status="failed", final_status="failed", bot_token_id=bot_token_id)
-    except DuplicateKeyError:
-        # אם יש כפילות, נעדכן בלי ה-bot_token_id
-        _update_flow(flow_id, status="failed", final_status="failed")
+    if flow_id:
+        try:
+            _update_flow(flow_id, status="failed", final_status="failed", bot_token_id=bot_token_id)
+        except DuplicateKeyError:
+            # אם יש כפילות, נעדכן בלי ה-bot_token_id
+            _update_flow(flow_id, status="failed", final_status="failed")
+        except Exception as e:
+            print(f"⚠️ Failed to update flow status: {e}")
+    
     log_funnel_event(user_id, "creation_failed", flow_id=flow_id,
                      bot_token_id=bot_token_id,
                      metadata={"error": error_message})
     
-    # שליחת התראה לאדמין על הכשלון
+    # שליחת התראה לאדמין על הכשלון (גם אם אין flow_id)
     _notify_creation_failure(user_id, bot_token_id, error_message, flow_id)
 
 
@@ -1601,8 +1613,14 @@ def _create_bot(bot_token, instruction, user_id=None, flow_id=None):
             _update_flow(flow_id, status="creating", stage=3, bot_token_id=bot_token_id)
         except DuplicateKeyError:
             # טוקן כבר בשימוש ב-flow אחר
+            error_message = (
+                "⚠️ *טוקן זה כבר בשימוש*\n\n"
+                "נראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\n"
+                "אם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש."
+            )
+            _fail_flow(flow_id, user_id, bot_token_id, error_message)
             return {
-                "text": "⚠️ *טוקן זה כבר בשימוש*\n\nנראה שכבר התחלת תהליך יצירה עם הטוקן הזה בעבר.\n\nאם הבוט לא נוצר, נסה ליצור טוקן חדש ב-@BotFather ושלח /start כדי להתחיל מחדש.",
+                "text": error_message,
                 "parse_mode": "Markdown"
             }
         log_funnel_event(user_id, "description_submitted", flow_id=flow_id,
