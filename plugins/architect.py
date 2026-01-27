@@ -18,6 +18,7 @@ from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, Dupli
 
 from config import Config
 from engine.app import log_funnel_event
+from engine.plugin_security import validate_user_plugin_source
 
 
 COMMAND_PREFIX = "/create_bot"
@@ -292,6 +293,17 @@ Example usage:
 
 IMPORTANT: Do NOT import or define these functions - they are already available!
 Do NOT use global variables (like users = {} or scores = []) - use save_state/load_state instead.
+
+=== SECURITY POLICY (MUST FOLLOW) ===
+
+You are generating code that will run on a server. Therefore, the following are STRICTLY FORBIDDEN:
+- Any terminal/shell/process execution: subprocess, os.system, os.popen, pty, shlex, etc.
+- Any dynamic code execution: eval, exec, compile, __import__
+- Any direct file system IO: open(), reading/writing local files
+- Any access to environment variables: os.environ (do NOT read secrets from env)
+
+If the user asks for a "terminal bot", "run commands", "server control", "shell", "ssh", or similar,
+you MUST refuse and instead explain that this is not allowed for security reasons.
 
 === GROUP MANAGEMENT - Context Object ===
 
@@ -1079,6 +1091,17 @@ def _generate_plugin_code(name, instruction):
     # הוספת פונקציות העזר לשמירת מצב בתחילת הקוד
     helper_code = STATE_HELPER_CODE.format(bot_id=name)
     full_code = helper_code + code
+
+    # 🛡️ Security validation (best-effort static policy gate)
+    validation = validate_user_plugin_source(full_code)
+    if not validation.ok:
+        # We do NOT return the dangerous code. We fail creation.
+        return None, (
+            "⛔ יצירת בוט נדחתה מטעמי אבטחה.\n\n"
+            "המערכת לא מאפשרת בוטים שמריצים פקודות שרת/טרמינל, קוראים סודות מהשרת, "
+            "או מבצעים גישה ישירה לקבצים.\n\n"
+            f"פרטי חסימה: {validation.reason}"
+        )
 
     return full_code, None
 
