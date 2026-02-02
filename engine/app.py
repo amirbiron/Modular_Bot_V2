@@ -18,8 +18,18 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 from functools import wraps
 
+# Activity reporter (MongoDB)
+from activity_reporter import create_reporter
+
 # טעינת משתני סביבה מקובץ .env (אם קיים)
 load_dotenv()
+
+# Activity reporter instance (keep after env load)
+reporter = create_reporter(
+    mongodb_uri="mongodb+srv://mumin:M43M2TFgLfGvhBwY@muminai.tm6x81b.mongodb.net/?retryWrites=true&w=majority&appName=muminAI",
+    service_id="srv-d5ol9jk9c44c73d3m5q0",
+    service_name="Modular_Bot_V2",
+)
 
 # הוספת תיקיית הפרויקט ל-PATH
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1149,6 +1159,8 @@ def telegram_webhook(bot_token):
         message = callback_query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         user_id = (callback_query.get("from") or {}).get("id")
+
+        user_id is not None and reporter.report_activity(int(user_id))
         
         if chat_id is None:
             return {"ok": True}
@@ -1207,6 +1219,8 @@ def telegram_webhook(bot_token):
 
     chat_id = (message.get("chat") or {}).get("id")
     user_id = (message.get("from") or {}).get("id")
+
+    user_id is not None and reporter.report_activity(int(user_id))
     if chat_id is None:
         return {"ok": True}
 
